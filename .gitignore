@@ -1,0 +1,15 @@
+# Byte-compiled / cache
+__pycache__/
+*.pyc
+
+# Temp & outputs
+temp/
+*.wav
+*.mp3
+*.m4a
+
+# Local config (use panel or sample file)
+config.json
+
+# Archives
+*.zip
