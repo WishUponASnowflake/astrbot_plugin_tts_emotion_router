@@ -63,6 +63,8 @@ class SiliconFlowTTS:
             "input": text,
             "response_format": self.format,
             "speed": eff_speed,
+            "gain": 5,  # +50% 增益
+
         }
 
         last_err = None
