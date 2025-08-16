@@ -131,8 +131,9 @@ class TTSEmotionRouter(Star):
                 "angry": re.compile(r"angry|furious|mad|rage", re.I),
             }
         
-        # 去重机制 - 简化版
+        # 去重机制 - 简化版，增加处理标记
         self._event_guard: Dict[str, float] = {}
+        self._processing_events: set = set()  # 正在处理的事件集合
 
     # ---------------- helpers -----------------
     def _event_key(self, event: AstrMessageEvent) -> Optional[str]:
@@ -191,6 +192,14 @@ class TTSEmotionRouter(Star):
             for k, ts in list(self._event_guard.items()):
                 if now - ts > 60:
                     self._event_guard.pop(k, None)
+            
+            # 同时清理可能泄漏的处理标记（超过30秒的）
+            if hasattr(self, '_processing_events'):
+                # 注意：正常情况下processing_events应该很快被清理
+                # 这里只是防止异常情况下的内存泄漏
+                if len(self._processing_events) > 100:  # 异常情况
+                    logging.warning("TTS: processing_events size is too large, clearing")
+                    self._processing_events.clear()
         except Exception:
             pass
 
@@ -671,8 +680,23 @@ class TTSEmotionRouter(Star):
             f"增益: {api_cfg.get('gain', 3.0)} dB",
             f"采样率: {api_cfg.get('sample_rate', 24000)} Hz",
             f"模型: {api_cfg.get('model', 'gpt-tts-pro')}",
+            f"事件去重队列: {len(self._event_guard)} 项",
+            f"正在处理: {len(self._processing_events)} 项",
         ]
         yield event.plain_result("TTS参数:\n" + "\n".join(debug_info))
+
+    @filter.command("tts_clear", priority=1)
+    async def tts_clear(self, event: AstrMessageEvent):
+        """清理TTS状态缓存（调试用）"""
+        try:
+            self._event_guard.clear()
+            self._processing_events.clear()
+            for state in self._session_state.values():
+                state.last_tts_sig = None
+                state.last_tts_time = 0.0
+            yield event.plain_result("TTS状态缓存已清理")
+        except Exception as e:
+            yield event.plain_result(f"清理失败: {e}")
 
     @filter.command("tts_status", priority=1)
     async def tts_status(self, event: AstrMessageEvent):
@@ -684,20 +708,39 @@ class TTSEmotionRouter(Star):
     # ---------------- Core hook -----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
-        # 简化的事件去重：同一消息事件5s内只处理一次
+        # 强化的事件去重：同一消息事件8s内只处理一次
         ek = None
         try:
             ek = self._event_key(event)
             if ek:
+                # 检查是否正在处理中
+                if ek in self._processing_events:
+                    logging.debug("TTS: event already in processing")
+                    return
+                
                 self._sweep_event_guard()
                 last = self._event_guard.get(ek)
-                if last and (time.time() - last) < 5:
-                    logging.debug("TTS: skip duplicate event within 5s")
+                if last and (time.time() - last) < 8:
+                    logging.debug("TTS: skip duplicate event within 8s")
                     return
+                
+                # 标记为正在处理
+                self._processing_events.add(ek)
                 # 先占位，避免并发重复进入
                 self._event_guard[ek] = time.time()
         except Exception:
             pass
+
+        try:
+            # 原有的处理逻辑
+            await self._do_tts_processing(event, ek)
+        finally:
+            # 确保清理处理标记
+            if ek and ek in self._processing_events:
+                self._processing_events.discard(ek)
+
+    async def _do_tts_processing(self, event: AstrMessageEvent, ek: Optional[str]):
+        """实际的TTS处理逻辑"""
 
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
@@ -817,11 +860,11 @@ class TTSEmotionRouter(Star):
         except Exception:
             speed_override = None
 
-        # 简单的TTS去重：相同文本内容3秒内只生成一次
+        # 强化的TTS去重：相同文本内容5秒内只生成一次
         tts_sig = self._build_tts_sig(text, vkey, voice, speed_override)
         now = time.time()
-        if st.last_tts_sig == tts_sig and (now - st.last_tts_time) < 3:
-            logging.debug("TTS: skip duplicate TTS within 3s")
+        if st.last_tts_sig == tts_sig and (now - st.last_tts_time) < 5:
+            logging.info("TTS: skip duplicate TTS within 5s, sig=%s", tts_sig[:8])
             return
 
         logging.info(
@@ -855,3 +898,7 @@ class TTSEmotionRouter(Star):
         st.last_tts_sig = tts_sig
         st.last_tts_time = st.last_ts
         result.chain = [Record(file=str(audio_path))]
+        
+        # 标记事件处理完成
+        if ek:
+            self._event_guard[ek] = time.time()
