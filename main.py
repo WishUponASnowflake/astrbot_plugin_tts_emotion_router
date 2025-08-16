@@ -57,7 +57,16 @@ class TTSEmotionRouter(Star):
             self.config = self._load_config(config or {})
 
         api = self.config.get("api", {})
-        self.tts = SiliconFlowTTS(api.get("url", ""), api.get("key", ""), api.get("model", "gpt-tts-pro"), api.get("format", "wav"), float(api.get("speed", 1.0)))
+        api_url = api.get("url", "")
+        api_key = api.get("key", "")
+        api_model = api.get("model", "gpt-tts-pro")
+        api_format = api.get("format", "mp3")  # 默认 mp3，减少部分平台播放噪点
+        api_speed = float(api.get("speed", 1.0))
+        api_gain = float(api.get("gain", 5.0))   # +50% 增益
+        api_sr = int(api.get("sample_rate", 44100 if api_format in ("mp3", "wav") else 48000))
+        # 初始化 TTS 客户端（支持 gain 与 sample_rate）
+        self.tts = SiliconFlowTTS(api_url, api_key, api_model, api_format, api_speed, gain=api_gain, sample_rate=api_sr)
+
         self.voice_map: Dict[str, str] = self.config.get("voice_map", {})
         self.speed_map: Dict[str, float] = self.config.get("speed_map", {}) or {}
         self.global_enable: bool = bool(self.config.get("global_enable", True))
@@ -72,17 +81,53 @@ class TTSEmotionRouter(Star):
         self.heuristic_cls = HeuristicClassifier()
         # 标记驱动配置（不与表情包插件冲突：仅识别 [EMO:happy] 这类专属标记）
         marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
-        self.emo_marker_enable: bool = bool(marker_cfg.get("enable", False))
+        self.emo_marker_enable: bool = bool(marker_cfg.get("enable", True))  # 默认开启
         self.emo_marker_tag: str = str(marker_cfg.get("tag", "EMO"))
         try:
             tag = re.escape(self.emo_marker_tag)
             self._emo_marker_re = re.compile(rf"\[\s*{tag}\s*:\s*(happy|sad|angry|neutral)\s*\]", re.I)
         except Exception:
             self._emo_marker_re = None
-
+        # 额外：更宽松的去除规则（允许 [EMO] / [EMO:] / 全角【EMO】 以及纯单词 emo 开头等变体）
+        try:
+            tag = re.escape(self.emo_marker_tag)
+            # 允许“:[label]”可缺省label，接受半/全角冒号及连字符，锚定开头以仅清理头部
+            self._emo_marker_re_any = re.compile(
+                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*(?:[:：-]\s*[a-z]*)?\s*[\]\)】]",
+                re.I,
+            )
+            # 头部 token：支持 [EMO] / [EMO:] / 【EMO：】 / emo / emo:happy / 等，label 可缺省（限定四选一）
+            self._emo_head_token_re = re.compile(
+                rf"^[\s\ufeff]*(?:[\[\(【]\s*{tag}\s*(?:[:：-]\s*(?P<lbl>happy|sad|angry|neutral))?\s*[\]\)】]|(?:{tag}|emo)\s*(?:[:：-]\s*(?P<lbl2>happy|sad|angry|neutral))?)\s*[,，。:：-]*\s*",
+                re.I,
+            )
+            # 头部 token（英文任意标签）：如 [EMO:confused]，先取 raw 再做同义词归一化
+            self._emo_head_anylabel_re = re.compile(
+                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*[:：-]\s*(?P<raw>[a-z]+)\s*[\]\)】]",
+                re.I,
+            )
+        except Exception:
+            self._emo_marker_re_any = None
+            self._emo_head_token_re = None
+            self._emo_head_anylabel_re = None
+        
         self._session_state: Dict[str, SessionState] = {}
         ensure_dir(TEMP_DIR)
         cleanup_dir(TEMP_DIR, ttl_seconds=6*3600)
+        
+        # 简单关键词启发，用于无标记时的中性偏置判定
+        try:
+            self._emo_kw = {
+                "happy": re.compile(r"(开心|快乐|高兴|喜悦|愉快|兴奋|喜欢|令人开心|挺好|不错|开心|happy|joy|delight|excited|great|awesome|lol)", re.I),
+                "sad": re.compile(r"(伤心|难过|沮丧|低落|悲伤|哭|流泪|难受|失望|委屈|心碎|sad|depress|upset|unhappy|blue|tear)", re.I),
+                "angry": re.compile(r"(生气|愤怒|火大|恼火|气愤|气死|怒|怒了|生气了|angry|furious|mad|rage|annoyed|irritat)", re.I),
+            }
+        except Exception:
+            self._emo_kw = {
+                "happy": re.compile(r"happy|joy|delight|excited", re.I),
+                "sad": re.compile(r"sad|depress|upset|unhappy", re.I),
+                "angry": re.compile(r"angry|furious|mad|rage", re.I),
+            }
 
     # ---------------- Config helpers -----------------
     def _load_config(self, cfg: dict) -> dict:
@@ -126,28 +171,212 @@ class TTSEmotionRouter(Star):
             return sid not in self.disabled_sessions
         return sid in self.enabled_sessions
 
+    def _normalize_text(self, text: str) -> str:
+        """移除不可见字符与BOM，避免破坏头部匹配。"""
+        if not text:
+            return text
+        invisibles = [
+            "\ufeff",  # BOM
+            "\u200b", "\u200c", "\u200d", "\u200e", "\u200f",  # ZW* & RTL/LTR marks
+            "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",  # directional marks
+        ]
+        for ch in invisibles:
+            text = text.replace(ch, "")
+        return text
+
+    def _normalize_label(self, label: Optional[str]) -> Optional[str]:
+        """将任意英文/中文情绪词映射到四选一。
+        例：confused->neutral，upset->sad，furious->angry，delighted->happy 等。"""
+        if not label:
+            return None
+        l = label.strip().lower()
+        mapping = {
+            "happy": {
+                "happy", "joy", "joyful", "cheerful", "delighted", "excited", "smile", "positive",
+                "开心", "快乐", "高兴", "喜悦", "兴奋", "愉快",
+            },
+            "sad": {
+                "sad", "sorrow", "sorrowful", "depressed", "down", "unhappy", "cry", "crying", "tearful", "blue", "upset",
+                "伤心", "难过", "沮丧", "低落", "悲伤", "流泪",
+            },
+            "angry": {
+                "angry", "mad", "furious", "annoyed", "irritated", "rage", "rageful", "wrath",
+                "生气", "愤怒", "恼火", "气愤",
+            },
+            "neutral": {
+                "neutral", "calm", "plain", "normal", "objective", "ok", "fine", "meh", "average", "confused", "uncertain", "unsure",
+                "平静", "冷静", "一般", "中立", "客观", "困惑", "迷茫",
+            },
+        }
+        for k, vs in mapping.items():
+            if l in vs:
+                return k
+        return None
+
+    def _pick_voice_for_emotion(self, emotion: str):
+        """根据情绪选择音色：优先 exact -> neutral -> 偏好映射 -> 任意非空。
+        返回 (voice_key, voice_uri)；若无可用则 (None, None)。"""
+        vm = self.voice_map or {}
+        # exact
+        v = vm.get(emotion)
+        if v:
+            return emotion, v
+        # neutral
+        v = vm.get("neutral")
+        if v:
+            return "neutral", v
+        # 偏好映射（让缺失的项落到最接近的可用音色）
+        pref = {"sad": "angry", "angry": "angry", "happy": "happy", "neutral": "happy"}
+        for key in [pref.get(emotion), "happy", "angry"]:
+            if key and vm.get(key):
+                return key, vm[key]
+        # 兜底：任意非空
+        for k, v in vm.items():
+            if v:
+                return k, v
+        return None, None
+
+    def _strip_emo_head(self, text: str) -> tuple[str, Optional[str]]:
+        """从文本开头剥离各种 EMO/emo 标记变体，并返回(清理后的文本, 解析到的情绪或None)。"""
+        if not text:
+            return text, None
+        # 优先用宽松的头部匹配（限定四选一）
+        if self._emo_head_token_re:
+            m = self._emo_head_token_re.match(text)
+            if m:
+                label = (m.group('lbl') or m.group('lbl2') or "").lower()
+                if label not in EMOTIONS:
+                    label = None
+                cleaned = self._emo_head_token_re.sub("", text, count=1)
+                return cleaned.strip(), label
+        # 其次：捕获任意英文标签，再做同义词归一化
+        if self._emo_head_anylabel_re:
+            m2 = self._emo_head_anylabel_re.match(text)
+            if m2:
+                raw = (m2.group('raw') or "").lower()
+                label = self._normalize_label(raw)
+                cleaned = self._emo_head_anylabel_re.sub("", text, count=1)
+                return cleaned.strip(), label
+        # 最后：去掉任何形态头部标签（即便无法识别标签含义也移除）
+        if self._emo_marker_re_any and text.lstrip().startswith(("[", "【", "(")):
+            cleaned = self._emo_marker_re_any.sub("", text, count=1)
+            return cleaned.strip(), None
+        return text, None
+
+    def _strip_emo_head_many(self, text: str) -> tuple[str, Optional[str]]:
+        """连续剥离多枚开头的EMO/emo标记（若LLM/其它插件重复注入）。返回(清理后文本, 最后一次解析到的情绪)。"""
+        last_label: Optional[str] = None
+        while True:
+            cleaned, label = self._strip_emo_head(text)
+            if label:
+                last_label = label
+            if cleaned == text:
+                break
+            text = cleaned
+        return text, last_label
+
+    # ---------------- LLM 请求前：注入情绪标记指令 -----------------
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, request):
+        """在系统提示中加入隐藏情绪标记指令，让 LLM 先输出 [EMO:xxx] 再回答。"""
+        if not self.emo_marker_enable:
+            return
+        try:
+            tag = self.emo_marker_tag
+            instr = (
+                f"请在每次回复的最开头只输出一个隐藏情绪标记，格式严格为："
+                f"[{tag}:happy] 或 [{tag}:sad] 或 [{tag}:angry] 或 [{tag}:neutral]。"
+                "必须四选一；若无法判断请选择 neutral。该标记仅供系统解析，"
+                "输出后立刻继续正常作答，不要解释或复述该标记。"
+                "如你想到其它词，请映射到以上四类：happy(开心/喜悦/兴奋)、sad(伤心/难过/沮丧/upset)、"
+                "angry(生气/愤怒/恼火/furious)、neutral(平静/普通/困惑/confused)。"
+            )
+            request.system_prompt = (request.system_prompt or "") + "\n" + instr
+        except Exception:
+            pass
+
     # ---------------- LLM 标记解析（避免标签外显） -----------------
-    @filter.on_llm_response(priority=100)
+    @filter.on_llm_response(priority=1)
     async def on_llm_response(self, event: AstrMessageEvent, response: LLMResponse):
         if not self.emo_marker_enable:
             return
-        text = getattr(response, "completion_text", None)
-        if not (text and self._emo_marker_re):
-            return
-        # 解析并移除自有标记，如 [EMO:happy]
-        m = self._emo_marker_re.search(text)
-        if not m:
-            return
-        label = (m.group(1) or "").lower()
+        label: Optional[str] = None
+
+        # 1) 尝试从 completion_text 提取并清理
+        try:
+            text = getattr(response, "completion_text", None)
+            if isinstance(text, str) and text.strip():
+                t0 = self._normalize_text(text)
+                cleaned, l1 = self._strip_emo_head_many(t0)
+                if l1 in EMOTIONS:
+                    label = l1
+                response.completion_text = cleaned
+        except Exception:
+            pass
+
+        # 2) 无论 completion_text 是否为空，都从 result_chain 首个 Plain 再尝试一次
+        try:
+            rc = getattr(response, "result_chain", None)
+            if rc and hasattr(rc, "chain") and rc.chain:
+                new_chain = []
+                cleaned_once = False
+                for comp in rc.chain:
+                    if not cleaned_once and isinstance(comp, Plain) and getattr(comp, "text", None):
+                        t0 = self._normalize_text(comp.text)
+                        t, l2 = self._strip_emo_head_many(t0)
+                        if l2 in EMOTIONS and label is None:
+                            label = l2
+                        if t:
+                            new_chain.append(Plain(text=t))
+                        cleaned_once = True
+                    else:
+                        new_chain.append(comp)
+                rc.chain = new_chain
+        except Exception:
+            pass
+
+        # 3) 记录到 session
         if label in EMOTIONS:
             sid = self._sess_id(event)
             st = self._session_state.setdefault(sid, SessionState())
             st.pending_emotion = label
-        # 把自有标记移除，避免用户看到；不处理其它插件的标记
-        new_text = self._emo_marker_re.sub("", text)
-        response.completion_text = new_text.strip()
 
     # ---------------- Commands -----------------
+    @filter.command("tts_marker_on", priority=1)
+    async def tts_marker_on(self, event: AstrMessageEvent):
+        self.emo_marker_enable = True
+        emo_cfg = self.config.get("emotion", {}) or {}
+        marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
+        marker_cfg["enable"] = True
+        emo_cfg["marker"] = marker_cfg
+        self.config["emotion"] = emo_cfg
+        self._save_config()
+        yield event.plain_result("情绪隐藏标记：开启")
+
+    @filter.command("tts_marker_off", priority=1)
+    async def tts_marker_off(self, event: AstrMessageEvent):
+        self.emo_marker_enable = False
+        emo_cfg = self.config.get("emotion", {}) or {}
+        marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
+        marker_cfg["enable"] = False
+        emo_cfg["marker"] = marker_cfg
+        self.config["emotion"] = emo_cfg
+        self._save_config()
+        yield event.plain_result("情绪隐藏标记：关闭")
+
+    @filter.command("tts_emote", priority=1)
+    async def tts_emote(self, event: AstrMessageEvent, *, value: Optional[str] = None):
+        """手动指定下一条消息的情绪用于路由：tts_emote happy|sad|angry|neutral"""
+        try:
+            label = (value or "").strip().lower()
+            assert label in EMOTIONS
+            sid = self._sess_id(event)
+            st = self._session_state.setdefault(sid, SessionState())
+            st.pending_emotion = label
+            yield event.plain_result(f"已设置：下一条消息按情绪 {label} 路由")
+        except Exception:
+            yield event.plain_result("用法：tts_emote <happy|sad|angry|neutral>")
+
     @filter.command("tts_global_on", priority=1)
     async def tts_global_on(self, event: AstrMessageEvent):
         self.global_enable = True
@@ -232,6 +461,28 @@ class TTSEmotionRouter(Star):
         except Exception:
             yield event.plain_result("用法：tts_cooldown <非负整数(秒)>")
 
+    @filter.command("tts_gain", priority=1)
+    async def tts_gain(self, event: AstrMessageEvent, *, value: Optional[str] = None):
+        """调节输出音量增益（单位dB，范围 -10 ~ 10）。示例：tts_gain 5"""
+        try:
+            if value is None:
+                raise ValueError
+            v = float(value)
+            assert -10.0 <= v <= 10.0
+            # 更新运行期
+            try:
+                self.tts.gain = v
+            except Exception:
+                pass
+            # 持久化
+            api_cfg = self.config.get("api", {}) or {}
+            api_cfg["gain"] = v
+            self.config["api"] = api_cfg
+            self._save_config()
+            yield event.plain_result(f"TTS音量增益已设为 {v} dB")
+        except Exception:
+            yield event.plain_result("用法：tts_gain <-10~10>，例：tts_gain 5")
+
     @filter.command("tts_status", priority=1)
     async def tts_status(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
@@ -244,19 +495,30 @@ class TTSEmotionRouter(Star):
     async def on_decorating_result(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
-            # 即使本会话未启用，也不影响上游 on_llm_response 对标签的移除
-            return
-
-        # 冷却
-        st = self._session_state.setdefault(sid, SessionState())
-        now = time.time()
-        if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
             return
 
         # 结果链
         result = event.get_result()
         if not result or not result.chain:
             return
+
+        # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
+        try:
+            new_chain = []
+            cleaned_once = False
+            for comp in result.chain:
+                if not cleaned_once and isinstance(comp, Plain) and getattr(comp, "text", None):
+                    t0 = comp.text
+                    t0 = self._normalize_text(t0)
+                    t, _ = self._strip_emo_head_many(t0)
+                    if t:
+                        new_chain.append(Plain(text=t))
+                    cleaned_once = True
+                else:
+                    new_chain.append(comp)
+            result.chain = new_chain
+        except Exception:
+            pass
 
         # 是否允许混合
         if not self.allow_mixed and any(not isinstance(c, Plain) for c in result.chain):
@@ -268,12 +530,19 @@ class TTSEmotionRouter(Star):
             return
         text = " ".join(text_parts)
 
-        # 先保障隐藏标记不外显（仅处理本插件自有标记）
-        if self._emo_marker_re:
-            text = self._emo_marker_re.sub("", text).strip()
+        # 归一化 + 连续剥离（终极兜底）
+        orig_text = text
+        text = self._normalize_text(text)
+        text, _ = self._strip_emo_head_many(text)
 
         # 过滤链接/文件等提示性内容，避免朗读
         if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I):
+            return
+
+        # 随机/冷却/长度
+        st = self._session_state.setdefault(sid, SessionState())
+        now = time.time()
+        if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
             return
 
         # 长度限制
@@ -288,10 +557,20 @@ class TTSEmotionRouter(Star):
         if st.pending_emotion in EMOTIONS:
             emotion = st.pending_emotion
             st.pending_emotion = None
+            src = "tag"
         else:
             emotion = self.heuristic_cls.classify(text, context=None)
-
-        voice = self.voice_map.get(emotion) or self.voice_map.get("neutral")
+            src = "heuristic"
+            # 中性偏置：若文本无明显情绪关键词，则强制使用 neutral
+            try:
+                kw = getattr(self, "_emo_kw", {})
+                has_kw = any(p.search(text) for p in kw.values())
+                if not has_kw:
+                    emotion = "neutral"
+            except Exception:
+                pass
+        
+        vkey, voice = self._pick_voice_for_emotion(emotion)
         if not voice:
             logging.warning("No voice mapped for emotion=%s", emotion)
             return
@@ -308,8 +587,24 @@ class TTSEmotionRouter(Star):
         except Exception:
             speed_override = None
 
+        logging.info(
+            "TTS route: emotion=%s(src=%s) -> %s (%s), speed=%s",
+            emotion,
+            src,
+            vkey,
+            (voice[:40] + "...") if isinstance(voice, str) and len(voice) > 43 else voice,
+            speed_override if speed_override is not None else getattr(self.tts, "speed", None),
+        )
+        logging.debug("TTS input head(before/after): %r -> %r", orig_text[:60], text[:60])
+
         out_dir = TEMP_DIR / sid
         ensure_dir(out_dir)
+        # 最后一重防线：若 TTS 前文本仍以 emo/token 开头，强制清理
+        try:
+            if text and (text.lower().lstrip().startswith("emo") or text.lstrip().startswith(("[", "【", "("))):
+                text, _ = self._strip_emo_head_many(text)
+        except Exception:
+            pass
         audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
         if not audio_path:
             logging.error("TTS调用失败，降级为文本")
