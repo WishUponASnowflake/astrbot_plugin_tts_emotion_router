@@ -73,8 +73,8 @@ class TTSEmotionRouter(Star):
         self.voice_map = self.config.get("voice_map", {})
         self.speed_map = self.config.get("speed_map", {}) or {}
         self.global_enable = bool(self.config.get("global_enable", True))
-        self.enabled_sessions = list(self.config.get("enabled_sessions", []))
-        self.disabled_sessions = list(self.config.get("disabled_sessions", []))
+        self.enabled_sessions = self._coerce_session_list(self.config.get("enabled_sessions", []))
+        self.disabled_sessions = self._coerce_session_list(self.config.get("disabled_sessions", []))
         self.prob = float(self.config.get("prob", 0.35))
         self.text_limit = int(self.config.get("text_limit", 80))
         self.cooldown = int(self.config.get("cooldown", 20))
@@ -146,6 +146,22 @@ class TTSEmotionRouter(Star):
             self.cleanup_delay = 120
 
     # ---------------- helpers -----------------
+    def _coerce_session_list(self, v) -> List[str]:
+        """将配置中的会话列表字段统一为 list[str]。
+        - 支持传入 list[str]
+        - 支持以逗号/分号/空白分隔的字符串
+        - 其他类型返回空列表
+        """
+        try:
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+            if isinstance(v, str):
+                parts = re.split(r"[\s,，;；]+", v.strip()) if v else []
+                return [p for p in parts if p]
+        except Exception:
+            pass
+        return []
+
     def _event_key(self, event: AstrMessageEvent) -> Optional[str]:
         """构造事件唯一键，用于避免同一消息事件重复处理。"""
         try:
