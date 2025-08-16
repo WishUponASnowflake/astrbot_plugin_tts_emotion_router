@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import random
 import re
@@ -63,28 +64,28 @@ class TTSEmotionRouter(Star):
         api_key = api.get("key", "")
         api_model = api.get("model", "gpt-tts-pro")
         api_format = api.get("format", "wav")  # 改为wav格式，通常更稳定
-        api_speed = float(api.get("speed", 0.9))  # 稍微慢一点，避免截断
-        api_gain = float(api.get("gain", 3.0))   # 降低增益，避免失真
+        api_speed = float(api.get("speed", 1.05))  # 默认语速 1.05
+        api_gain = float(api.get("gain", 0.0))   # 默认增益 0 dB
         api_sr = int(api.get("sample_rate", 24000 if api_format in ("mp3", "wav") else 24000))  # 降低采样率，提高稳定性
         # 初始化 TTS 客户端（支持 gain 与 sample_rate）
         self.tts = SiliconFlowTTS(api_url, api_key, api_model, api_format, api_speed, gain=api_gain, sample_rate=api_sr)
 
-        self.voice_map: Dict[str, str] = self.config.get("voice_map", {})
-        self.speed_map: Dict[str, float] = self.config.get("speed_map", {}) or {}
-        self.global_enable: bool = bool(self.config.get("global_enable", True))
-        self.enabled_sessions: List[str] = list(self.config.get("enabled_sessions", []))
-        self.disabled_sessions: List[str] = list(self.config.get("disabled_sessions", []))
-        self.prob: float = float(self.config.get("prob", 0.35))
-        self.text_limit: int = int(self.config.get("text_limit", 80))
-        self.cooldown: int = int(self.config.get("cooldown", 20))
-        self.allow_mixed: bool = bool(self.config.get("allow_mixed", False))
+        self.voice_map = self.config.get("voice_map", {})
+        self.speed_map = self.config.get("speed_map", {}) or {}
+        self.global_enable = bool(self.config.get("global_enable", True))
+        self.enabled_sessions = list(self.config.get("enabled_sessions", []))
+        self.disabled_sessions = list(self.config.get("disabled_sessions", []))
+        self.prob = float(self.config.get("prob", 0.35))
+        self.text_limit = int(self.config.get("text_limit", 80))
+        self.cooldown = int(self.config.get("cooldown", 20))
+        self.allow_mixed = bool(self.config.get("allow_mixed", False))
         # 情绪分类：仅启发式 + 隐藏标记
         emo_cfg = self.config.get("emotion", {}) or {}
         self.heuristic_cls = HeuristicClassifier()
         # 标记驱动配置（不与表情包插件冲突：仅识别 [EMO:happy] 这类专属标记）
         marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
-        self.emo_marker_enable: bool = bool(marker_cfg.get("enable", True))  # 默认开启
-        self.emo_marker_tag: str = str(marker_cfg.get("tag", "EMO"))
+        self.emo_marker_enable = bool(marker_cfg.get("enable", True))  # 默认开启
+        self.emo_marker_tag = str(marker_cfg.get("tag", "EMO"))
         try:
             tag = re.escape(self.emo_marker_tag)
             self._emo_marker_re = re.compile(rf"\[\s*{tag}\s*:\s*(happy|sad|angry|neutral)\s*\]", re.I)
@@ -113,7 +114,7 @@ class TTSEmotionRouter(Star):
             self._emo_head_token_re = None
             self._emo_head_anylabel_re = None
         
-        self._session_state: Dict[str, SessionState] = {}
+        self._session_state = {}
         ensure_dir(TEMP_DIR)
         cleanup_dir(TEMP_DIR, ttl_seconds=6*3600)
         
@@ -132,8 +133,17 @@ class TTSEmotionRouter(Star):
             }
         
         # 去重机制 - 简化版，增加处理标记
-        self._event_guard: Dict[str, float] = {}
-        self._processing_events: set = set()  # 正在处理的事件集合
+        self._event_guard = {}
+        self._processing_events = set()  # 正在处理的事件集合
+        # 发送前短窗去重（发送者级 / 发送者+文本级）
+        self._sender_guard = {}  # sender_key -> ts
+        self._sender_text_guard = {}  # sender_key -> (text_sig, ts)
+
+        # 自动清理延时（秒），防止音频堆积；默认 120s，可通过配置键 cleanup_delay 覆盖
+        try:
+            self.cleanup_delay = int(self.config.get("cleanup_delay", 120))
+        except Exception:
+            self.cleanup_delay = 120
 
     # ---------------- helpers -----------------
     def _event_key(self, event: AstrMessageEvent) -> Optional[str]:
@@ -203,6 +213,46 @@ class TTSEmotionRouter(Star):
         except Exception:
             pass
 
+    def _sweep_sender_guard(self):
+        """清理发送者级短窗去重记录（默认窗口5s，实际逻辑用2s）。"""
+        try:
+            now = time.time()
+            for k, ts in list(self._sender_guard.items()):
+                if now - ts > 5:
+                    self._sender_guard.pop(k, None)
+        except Exception:
+            pass
+
+    def _sweep_sender_text_guard(self):
+        """清理发送者+文本级短窗去重记录（默认窗口12s，实际逻辑用8s）。"""
+        try:
+            now = time.time()
+            for k, (sig, ts) in list(self._sender_text_guard.items()):
+                if now - ts > 12:
+                    self._sender_text_guard.pop(k, None)
+        except Exception:
+            pass
+
+    def _strip_our_records(self, result, sid: str):
+        """从结果链移除本插件生成的音频，避免重复发送。"""
+        try:
+            base = (TEMP_DIR / sid).resolve()
+            new_chain = []
+            for comp in getattr(result, "chain", []) or []:
+                if isinstance(comp, Record):
+                    f = getattr(comp, "file", "") or ""
+                    try:
+                        tgt = Path(f).resolve()
+                        if str(tgt).startswith(str(base)):
+                            # 跳过我们生成的音频（不再二次发送）
+                            continue
+                    except Exception:
+                        pass
+                new_chain.append(comp)
+            result.chain = new_chain
+        except Exception:
+            pass
+
     def _strip_leading_mentions(self, text: str) -> str:
         """去掉开头的 @提及 / 回复 @某人 前缀，避免因仅有提及差异而绕过去重或读出无意义内容。"""
         if not text:
@@ -221,6 +271,27 @@ class TTSEmotionRouter(Star):
         except Exception:
             pass
         return text
+
+    async def _del_file_later(self, fpath: str | Path, delay: Optional[int] = None):
+        """延时删除已发送音频文件（仅限 temp/<sid>/ 下的文件）"""
+        try:
+            d = self.cleanup_delay if delay is None else int(delay)
+        except Exception:
+            d = 120
+        try:
+            await asyncio.sleep(max(1, d))
+        except Exception:
+            # 若事件循环不可用则直接返回（不影响主流程）
+            return
+        try:
+            p = Path(fpath)
+            # 仅删除我们自己的 temp 目录下的文件，避免误删
+            if not str(p).lower().startswith(str(TEMP_DIR).lower()):
+                return
+            if p.exists() and p.is_file():
+                p.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def _build_tts_sig(self, text: str, vkey: Optional[str], voice: Optional[str], speed: Optional[float]) -> str:
         """构造一次TTS请求的签名，用于短时间去重。"""
@@ -682,6 +753,9 @@ class TTSEmotionRouter(Star):
             f"模型: {api_cfg.get('model', 'gpt-tts-pro')}",
             f"事件去重队列: {len(self._event_guard)} 项",
             f"正在处理: {len(self._processing_events)} 项",
+            f"发送者去重: {len(self._sender_guard)} 项",
+            f"发送者+文本去重: {len(self._sender_text_guard)} 项",
+            f"自动清理延时: {getattr(self, 'cleanup_delay', 120)} s",
         ]
         yield event.plain_result("TTS参数:\n" + "\n".join(debug_info))
 
@@ -691,12 +765,32 @@ class TTSEmotionRouter(Star):
         try:
             self._event_guard.clear()
             self._processing_events.clear()
+            self._sender_guard.clear()
+            self._sender_text_guard.clear()
             for state in self._session_state.values():
                 state.last_tts_sig = None
                 state.last_tts_time = 0.0
             yield event.plain_result("TTS状态缓存已清理")
         except Exception as e:
             yield event.plain_result(f"清理失败: {e}")
+
+    @filter.command("tts_cleanup", priority=1)
+    async def tts_cleanup(self, event: AstrMessageEvent, *, value: Optional[str] = None):
+        """设置或查看自动清理延时（秒）。例：tts_cleanup 180；设 0 可禁用。"""
+        try:
+            if value is None:
+                cur = getattr(self, "cleanup_delay", 120)
+                yield event.plain_result(f"当前自动清理延时: {cur} 秒 (0 表示禁用)")
+                return
+            v = int(value)
+            assert v >= 0
+            self.cleanup_delay = v
+            # 持久化到配置根（非 api 节点）
+            self.config["cleanup_delay"] = v
+            self._save_config()
+            yield event.plain_result(f"自动清理延时已设为 {v} 秒")
+        except Exception:
+            yield event.plain_result("用法：tts_cleanup <非负整数秒>；0=禁用")
 
     @filter.command("tts_status", priority=1)
     async def tts_status(self, event: AstrMessageEvent):
@@ -781,6 +875,17 @@ class TTSEmotionRouter(Star):
             return
         text = " ".join(text_parts)
         
+        # 发送者 2s 去重：命中则剥离我们生成的音频并返回，避免同一次生成被多次发送
+        now = time.time()
+        sk = self._sender_key(event)
+        if sk:
+            self._sweep_sender_guard()
+            last = self._sender_guard.get(sk)
+            if last and (now - last) < 2:
+                logging.info("TTS: sender-dedupe within 2s, drop our audio")
+                self._strip_our_records(result, sid)
+                return
+        
         # 基础文本检查
         if not text or not text.strip():
             return
@@ -811,6 +916,16 @@ class TTSEmotionRouter(Star):
         # 过滤纯符号或数字
         if re.match(r"^\s*[^\w\u4e00-\u9fff]*\s*$", text) or re.match(r"^\s*\d+\s*$", text):
             return
+
+        # 文本签名去重（同一发送者+文本 8s）
+        tsig = self._build_text_sig(text)
+        if sk:
+            self._sweep_sender_text_guard()
+            hit = self._sender_text_guard.get(sk)
+            if hit and hit[0] == tsig and (time.time() - hit[1]) < 8:
+                logging.info("TTS: sender-text-dedupe within 8s, drop our audio")
+                self._strip_our_records(result, sid)
+                return
 
         # 随机/冷却/长度
         st = self._session_state.setdefault(sid, SessionState())
@@ -864,7 +979,8 @@ class TTSEmotionRouter(Star):
         tts_sig = self._build_tts_sig(text, vkey, voice, speed_override)
         now = time.time()
         if st.last_tts_sig == tts_sig and (now - st.last_tts_time) < 5:
-            logging.info("TTS: skip duplicate TTS within 5s, sig=%s", tts_sig[:8])
+            logging.info("TTS: skip duplicate TTS within 5s, drop our audio")
+            self._strip_our_records(result, sid)
             return
 
         logging.info(
@@ -897,7 +1013,21 @@ class TTSEmotionRouter(Star):
         st.last_ts = time.time()
         st.last_tts_sig = tts_sig
         st.last_tts_time = st.last_ts
+
+        # 记录短窗去重键（发送者与发送者+文本），防止再次装饰重发
+        if sk:
+            try:
+                self._sender_guard[sk] = st.last_ts
+                self._sender_text_guard[sk] = (tsig if 'tsig' in locals() else self._build_text_sig(text), st.last_ts)
+            except Exception:
+                pass
+
         result.chain = [Record(file=str(audio_path))]
+        # 安排延时清理，避免长期堆积；给发送链路一定时间完成读取
+        try:
+            asyncio.create_task(self._del_file_later(audio_path, delay=self.cleanup_delay))
+        except Exception:
+            pass
         
         # 标记事件处理完成
         if ek:
