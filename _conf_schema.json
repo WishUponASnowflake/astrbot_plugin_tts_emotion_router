@@ -1,12 +1,12 @@
 {
-  "global_enable": { "type": "boolean", "default": true },
-  "enabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
-  "disabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
-  "prob": { "type": "number", "default": 0.35, "min": 0, "max": 1 },
-  "text_limit": { "type": "integer", "default": 80, "min": 0 },
-  "cooldown": { "type": "integer", "default": 20, "min": 0 },
-  "allow_mixed": { "type": "boolean", "default": false },
-  "cleanup_delay": { "type": "integer", "default": 120, "min": 0 },
+  "global_enable": { "type": "bool", "default": true },
+  "enabled_sessions": { "type": "list", "items": { "type": "string" }, "default": [] },
+  "disabled_sessions": { "type": "list", "items": { "type": "string" }, "default": [] },
+  "prob": { "type": "float", "default": 0.35, "min": 0, "max": 1 },
+  "text_limit": { "type": "int", "default": 80, "min": 0 },
+  "cooldown": { "type": "int", "default": 20, "min": 0 },
+  "allow_mixed": { "type": "bool", "default": false },
+  "cleanup_delay": { "type": "int", "default": 120, "min": 0 },
 
   "api": {
     "type": "object",
@@ -15,9 +15,9 @@
       "key": { "type": "string", "default": "" },
       "model": { "type": "string", "default": "gpt-tts-pro" },
       "format": { "type": "string", "default": "wav" },
-      "speed": { "type": "number", "default": 1.05 },
-      "gain": { "type": "number", "default": 0.0 },
-      "sample_rate": { "type": "integer", "default": 24000 }
+      "speed": { "type": "float", "default": 1.05 },
+      "gain": { "type": "float", "default": 0.0 },
+      "sample_rate": { "type": "int", "default": 24000 }
     }
   },
 
@@ -30,7 +30,7 @@
       "marker": {
         "type": "object",
         "properties": {
-          "enable": { "type": "boolean", "default": true },
+          "enable": { "type": "bool", "default": true },
           "tag": { "type": "string", "default": "EMO" },
           "prompt_hint": { "type": "string", "default": "" }
         }
