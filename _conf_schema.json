@@ -1,491 +1,56 @@
 {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://astrbot.dev/schemas/astrabot_plugin_tts_emotion_router.schema.json",
-    "title": "astrabot_plugin_tts_emotion_router config schema",
-    "type": "object",
-    "additionalProperties": true,
-    "properties": {
-        "global_enable": { "type": "boolean", "default": true },
-        "enabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
-        "disabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
-        "prob": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 },
-        "text_limit": { "type": "integer", "minimum": 0, "default": 80 },
-        "cooldown": { "type": "integer", "minimum": 0, "default": 20 },
-        "allow_mixed": { "type": "boolean", "default": false },
-        "cleanup_delay": { "type": "integer", "minimum": 0, "default": 120 },
-        "api": {
-            "type": "object",
-            "additionalProperties": true,
-            "properties": {
-                "url": { "type": "string", "description": "SiliconFlow API base URL" },
-                "key": { "type": "string", "description": "SiliconFlow API key (use env SILICONFLOW_API_KEY if empty)" },
-                "model": { "type": "string", "default": "gpt-tts-pro" },
-                "format": { "type": "string", "enum": ["wav", "mp3", "aac", "opus"], "default": "wav" },
-                "speed": { "type": "number", "default": 1.05 },
-                "gain": { "type": "number", "default": 0.0 },
-                "sample_rate": { "type": "integer", "default": 24000 }
-            },
-            "required": ["url", "key", "model"]
-        },
-        "voice_map": {
-            "type": "object",
-            "additionalProperties": { "type": "string" },
-            "description": "emotion -> voice URI mapping; at least provide 'neutral'"
-        },
-        "speed_map": {
-            "type": "object",
-            "additionalProperties": { "type": ["number", "string"] },
-            "description": "emotion -> speed multiplier"
-        },
-        "emotion": {
-            "type": "object",
-            "properties": {
-                "marker": {
-                    "type": "object",
-                    "properties": {
-                        "enable": { "type": "boolean", "default": true },
-                        "tag": { "type": "string", "default": "EMO" },
-                        "prompt_hint": { "type": "string" }
-                    },
-                    "additionalProperties": true
-                }
-            },
-            "additionalProperties": true
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://astrbot.dev/schemas/astrabot_plugin_tts_emotion_router.schema.json",
+  "title": "astrabot_plugin_tts_emotion_router config schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "global_enable": { "type": "boolean", "default": true },
+    "enabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "disabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "prob": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 },
+    "text_limit": { "type": "integer", "minimum": 0, "default": 80 },
+    "cooldown": { "type": "integer", "minimum": 0, "default": 20 },
+    "allow_mixed": { "type": "boolean", "default": false },
+    "cleanup_delay": { "type": "integer", "minimum": 0, "default": 120 },
+    "api": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "url": { "type": "string", "description": "SiliconFlow API base URL" },
+        "key": { "type": "string", "description": "SiliconFlow API key (use env SILICONFLOW_API_KEY if empty)" },
+        "model": { "type": "string", "default": "gpt-tts-pro" },
+        "format": { "type": "string", "enum": ["wav", "mp3", "aac", "opus"], "default": "wav" },
+        "speed": { "type": "number", "default": 1.05 },
+        "gain": { "type": "number", "default": 0.0 },
+        "sample_rate": { "type": "integer", "default": 24000 }
+      },
+      "required": ["url", "key", "model"]
+    },
+    "voice_map": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "emotion -> voice URI mapping; at least provide 'neutral'"
+    },
+    "speed_map": {
+      "type": "object",
+      "additionalProperties": { "type": ["number", "string"] },
+      "description": "emotion -> speed multiplier"
+    },
+    "emotion": {
+      "type": "object",
+      "properties": {
+        "marker": {
+          "type": "object",
+          "properties": {
+            "enable": { "type": "boolean", "default": true },
+            "tag": { "type": "string", "default": "EMO" },
+            "prompt_hint": { "type": "string" }
+          },
+          "additionalProperties": true
         }
+      },
+      "additionalProperties": true
     }
+  }
 }
-
-    # ---------------- LLM 请求前：注入情绪标记指令 -----------------
-    @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, request):
-        """在系统提示中加入隐藏情绪标记指令，让 LLM 先输出 [EMO:xxx] 再回答。"""
-        if not self.emo_marker_enable:
-            return
-        try:
-            tag = self.emo_marker_tag
-            instr = (
-                f"请在每次回复的最开头只输出一个隐藏情绪标记，格式严格为："
-                f"[{tag}:happy] 或 [{tag}:sad] 或 [{tag}:angry] 或 [{tag}:neutral]。"
-                "必须四选一；若无法判断请选择 neutral。该标记仅供系统解析，"
-                "输出后立刻继续正常作答，不要解释或复述该标记。"
-                "如你想到其它词，请映射到以上四类：happy(开心/喜悦/兴奋)、sad(伤心/难过/沮丧/upset)、"
-                "angry(生气/愤怒/恼火/furious)、neutral(平静/普通/困惑/confused)。"
-            )
-            request.system_prompt = (request.system_prompt or "") + "\n" + instr
-        except Exception:
-            pass
-
-    # ---------------- LLM 标记解析（避免标签外显） -----------------
-    @filter.on_llm_response(priority=1)
-    async def on_llm_response(self, event: AstrMessageEvent, response: LLMResponse):
-        if not self.emo_marker_enable:
-            return
-        label: Optional[str] = None
-
-        # 1) 尝试从 completion_text 提取并清理
-        try:
-            text = getattr(response, "completion_text", None)
-            if isinstance(text, str) and text.strip():
-                t0 = self._normalize_text(text)
-                cleaned, l1 = self._strip_emo_head_many(t0)
-                if l1 in EMOTIONS:
-                    label = l1
-                response.completion_text = cleaned
-        except Exception:
-            pass
-
-        # 2) 无论 completion_text 是否为空，都从 result_chain 首个 Plain 再尝试一次
-        try:
-            rc = getattr(response, "result_chain", None)
-            if rc and hasattr(rc, "chain") and rc.chain:
-                new_chain = []
-                cleaned_once = False
-                for comp in rc.chain:
-                    if not cleaned_once and isinstance(comp, Plain) and getattr(comp, "text", None):
-                        t0 = self._normalize_text(comp.text)
-                        t, l2 = self._strip_emo_head_many(t0)
-                        if l2 in EMOTIONS and label is None:
-                            label = l2
-                        if t:
-                            new_chain.append(Plain(text=t))
-                        cleaned_once = True
-                    else:
-                        new_chain.append(comp)
-                rc.chain = new_chain
-        except Exception:
-            pass
-
-        # 3) 记录到 session
-        if label in EMOTIONS:
-            sid = self._sess_id(event)
-            st = self._session_state.setdefault(sid, SessionState())
-            st.pending_emotion = label
-
-    # ---------------- Commands -----------------
-    @filter.command("tts_marker_on", priority=1)
-    async def tts_marker_on(self, event: AstrMessageEvent):
-        self.emo_marker_enable = True
-        emo_cfg = self.config.get("emotion", {}) or {}
-        marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
-        marker_cfg["enable"] = True
-        emo_cfg["marker"] = marker_cfg
-        self.config["emotion"] = emo_cfg
-        self._save_config()
-        yield event.plain_result("情绪隐藏标记：开启")
-
-    @filter.command("tts_marker_off", priority=1)
-    async def tts_marker_off(self, event: AstrMessageEvent):
-        self.emo_marker_enable = False
-        emo_cfg = self.config.get("emotion", {}) or {}
-        marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
-        marker_cfg["enable"] = False
-        emo_cfg["marker"] = marker_cfg
-        self.config["emotion"] = emo_cfg
-        self._save_config()
-        yield event.plain_result("情绪隐藏标记：关闭")
-
-    @filter.command("tts_emote", priority=1)
-    async def tts_emote(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        """手动指定下一条消息的情绪用于路由：tts_emote happy|sad|angry|neutral"""
-        try:
-            label = (value or "").strip().lower()
-            assert label in EMOTIONS
-            sid = self._sess_id(event)
-            st = self._session_state.setdefault(sid, SessionState())
-            st.pending_emotion = label
-            yield event.plain_result(f"已设置：下一条消息按情绪 {label} 路由")
-        except Exception:
-            yield event.plain_result("用法：tts_emote <happy|sad|angry|neutral>")
-
-    @filter.command("tts_global_on", priority=1)
-    async def tts_global_on(self, event: AstrMessageEvent):
-        self.global_enable = True
-        self.config["global_enable"] = True
-        self._save_config()
-        yield event.plain_result("TTS 全局：开启（黑名单模式）")
-
-    @filter.command("tts_global_off", priority=1)
-    async def tts_global_off(self, event: AstrMessageEvent):
-        self.global_enable = False
-        self.config["global_enable"] = False
-        self._save_config()
-        yield event.plain_result("TTS 全局：关闭（白名单模式）")
-
-    @filter.command("tts_on", priority=1)
-    async def tts_on(self, event: AstrMessageEvent):
-        sid = self._sess_id(event)
-        if self.global_enable:
-            if sid in self.disabled_sessions:
-                self.disabled_sessions.remove(sid)
-        else:
-            if sid not in self.enabled_sessions:
-                self.enabled_sessions.append(sid)
-        self.config["enabled_sessions"] = self.enabled_sessions
-        self.config["disabled_sessions"] = self.disabled_sessions
-        self._save_config()
-        yield event.plain_result("本会话TTS：开启")
-
-    @filter.command("tts_off", priority=1)
-    async def tts_off(self, event: AstrMessageEvent):
-        sid = self._sess_id(event)
-        if self.global_enable:
-            if sid not in self.disabled_sessions:
-                self.disabled_sessions.append(sid)
-        else:
-            if sid in self.enabled_sessions:
-                self.enabled_sessions.remove(sid)
-        self.config["enabled_sessions"] = self.enabled_sessions
-        self.config["disabled_sessions"] = self.disabled_sessions
-        self._save_config()
-        yield event.plain_result("本会话TTS：关闭")
-
-    @filter.command("tts_prob", priority=1)
-    async def tts_prob(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        try:
-            if value is None:
-                raise ValueError
-            v = float(value)
-            assert 0.0 <= v <= 1.0
-            self.prob = v
-            self.config["prob"] = v
-            self._save_config()
-            yield event.plain_result(f"TTS概率已设为 {v}")
-        except Exception:
-            yield event.plain_result("用法：tts_prob 0~1，如 0.35")
-
-    @filter.command("tts_limit", priority=1)
-    async def tts_limit(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        try:
-            if value is None:
-                raise ValueError
-            v = int(value)
-            assert v >= 0
-            self.text_limit = v
-            self.config["text_limit"] = v
-            self._save_config()
-            yield event.plain_result(f"TTS字数上限已设为 {v}")
-        except Exception:
-            yield event.plain_result("用法：tts_limit <非负整数>")
-
-    @filter.command("tts_cooldown", priority=1)
-    async def tts_cooldown(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        try:
-            if value is None:
-                raise ValueError
-            v = int(value)
-            assert v >= 0
-            self.cooldown = v
-            self.config["cooldown"] = v
-            self._save_config()
-            yield event.plain_result(f"TTS冷却时间已设为 {v}s")
-        except Exception:
-            yield event.plain_result("用法：tts_cooldown <非负整数(秒)>")
-
-    @filter.command("tts_gain", priority=1)
-    async def tts_gain(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        """调节输出音量增益（单位dB，范围 -10 ~ 10）。示例：tts_gain 5"""
-        try:
-            if value is None:
-                raise ValueError
-            v = float(value)
-            assert -10.0 <= v <= 10.0
-            # 更新运行期
-            try:
-                self.tts.gain = v
-            except Exception:
-                pass
-            # 持久化
-            api_cfg = self.config.get("api", {}) or {}
-            api_cfg["gain"] = v
-            self.config["api"] = api_cfg
-            self._save_config()
-            yield event.plain_result(f"TTS音量增益已设为 {v} dB")
-        except Exception:
-            yield event.plain_result("用法：tts_gain <-10~10>，例：tts_gain 5")
-
-    @filter.command("tts_status", priority=1)
-    async def tts_status(self, event: AstrMessageEvent):
-        sid = self._sess_id(event)
-        mode = "黑名单(默认开)" if self.global_enable else "白名单(默认关)"
-        enabled = self._is_session_enabled(sid)
-        yield event.plain_result(f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s")
-
-    # ---------------- Core hook -----------------
-    @filter.on_decorating_result()
-    async def on_decorating_result(self, event: AstrMessageEvent):
-        # 事件级去重：同一消息事件10s内只处理一次
-        try:
-            ek = self._event_key(event)
-            if ek:
-                self._sweep_event_guard()
-                last = self._event_guard.get(ek)
-                if last and (time.time() - last) < 10:
-                    logging.info("TTS event-dedupe: skip duplicated on same event within 10s")
-                    return
-                # 先占位，避免并发重复进入
-                self._event_guard[ek] = time.time()
-        except Exception:
-            pass
-
-        # 新增：同一群+同一发送者2秒内的重复触发也跳过（处理某些平台双回调/转发导致的重复）
-        try:
-            bk = self._sender_key(event)
-            if bk:
-                self._sweep_sender_guard()
-                now = time.time()
-                lastb = self._sender_guard.get(bk)
-                if lastb and (now - lastb) < 2:
-                    logging.info("TTS sender-dedupe: skip duplicate for same sender within 2s")
-                    return
-                self._sender_guard[bk] = now
-        except Exception:
-            pass
-
-        sid = self._sess_id(event)
-        if not self._is_session_enabled(sid):
-            return
-
-        # 结果链
-        result = event.get_result()
-        if not result or not result.chain:
-            return
-
-        # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
-        try:
-            new_chain = []
-            cleaned_once = False
-            for comp in result.chain:
-                if not cleaned_once and isinstance(comp, Plain) and getattr(comp, "text", None):
-                    t0 = comp.text
-                    t0 = self._normalize_text(t0)
-                    t, _ = self._strip_emo_head_many(t0)
-                    # 新增：去掉开头的 @提及/回复@某人
-                    t = self._strip_leading_mentions(t)
-                    if t:
-                        new_chain.append(Plain(text=t))
-                    cleaned_once = True
-                else:
-                    new_chain.append(comp)
-            result.chain = new_chain
-        except Exception:
-            pass
-
-        # 是否允许混合
-        if not self.allow_mixed and any(not isinstance(c, Plain) for c in result.chain):
-            return
-
-        # 拼接纯文本
-        text_parts = [c.text.strip() for c in result.chain if isinstance(c, Plain) and c.text.strip()]
-        if not text_parts:
-            return
-        text = " ".join(text_parts)
-
-        # 归一化 + 连续剥离（终极兜底）
-        orig_text = text
-        text = self._normalize_text(text)
-        text, _ = self._strip_emo_head_many(text)
-        # 新增：TTS 之前移除开头提及
-        text = self._strip_leading_mentions(text)
-
-        # 新增：同一发送者+同一规范化文本的8秒去重（即使音色/情绪不同也拦）
-        try:
-            bk = self._sender_key(event)
-            if bk:
-                self._sweep_sender_text_guard()
-                tsig = self._build_text_sig(text)
-                now2 = time.time()
-                last = self._sender_text_guard.get(bk)
-                if last and isinstance(last, tuple) and len(last) == 2:
-                    last_sig, last_ts = last
-                    if last_sig == tsig and (now2 - last_ts) < 8:
-                        logging.info("TTS sender-text-dedupe: skip same text for same sender within 8s")
-                        return
-                self._sender_text_guard[bk] = (tsig, now2)
-        except Exception:
-            pass
-
-        # 过滤链接/文件等提示性内容，避免朗读
-        if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I):
-            return
-
-        # 随机/冷却/长度
-        st = self._session_state.setdefault(sid, SessionState())
-        now = time.time()
-        if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
-            return
-
-        # 长度限制
-        if self.text_limit > 0 and len(text) > self.text_limit:
-            return
-
-        # 随机概率
-        if random.random() > self.prob:
-            return
-
-        # 情绪选择：优先使用隐藏标记 -> 启发式
-        if st.pending_emotion in EMOTIONS:
-            emotion = st.pending_emotion
-            st.pending_emotion = None
-            src = "tag"
-        else:
-            emotion = self.heuristic_cls.classify(text, context=None)
-            src = "heuristic"
-            # 中性偏置：若文本无明显情绪关键词，则强制使用 neutral
-            try:
-                kw = getattr(self, "_emo_kw", {})
-                has_kw = any(p.search(text) for p in kw.values())
-                if not has_kw:
-                    emotion = "neutral"
-            except Exception:
-                pass
-        
-        vkey, voice = self._pick_voice_for_emotion(emotion)
-        if not voice:
-            logging.warning("No voice mapped for emotion=%s", emotion)
-            return
-
-        # 依据情绪选择语速（未配置则为 None -> 使用默认）
-        speed_override = None
-        try:
-            if isinstance(self.speed_map, dict):
-                v = self.speed_map.get(emotion)
-                if v is None:
-                    v = self.speed_map.get("neutral")
-                if v is not None:
-                    speed_override = float(v)
-        except Exception:
-            speed_override = None
-
-        # 去重：相同文本/音色/语速在短时间内只发一次
-        tts_sig = self._build_tts_sig(text, vkey, voice, speed_override)
-        now = time.time()
-        if st.last_tts_sig == tts_sig and (now - st.last_tts_time) < 8:
-            logging.info("TTS dedupe: skip duplicate within 8s, sig=%s", tts_sig[:8])
-            return
-
-        logging.info(
-            "TTS route: emotion=%s(src=%s) -> %s (%s), speed=%s",
-            emotion,
-            src,
-            vkey,
-            (voice[:40] + "...") if isinstance(voice, str) and len(voice) > 43 else voice,
-            speed_override if speed_override is not None else getattr(self.tts, "speed", None),
-        )
-        logging.debug("TTS input head(before/after): %r -> %r", orig_text[:60], text[:60])
-
-        out_dir = TEMP_DIR / sid
-        ensure_dir(out_dir)
-        # 最后一重防线：若 TTS 前文本仍以 emo/token 开头，强制清理
-        try:
-            if text and (text.lower().lstrip().startswith("emo") or text.lstrip().startswith(("[", "【", "("))):
-                text, _ = self._strip_emo_head_many(text)
-        except Exception:
-            pass
-        audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
-        if not audio_path:
-            logging.error("TTS调用失败，降级为文本")
-            return
-
-        st.last_ts = time.time()
-        st.last_tts_sig = tts_sig
-        st.last_tts_time = st.last_ts
-        result.chain = [Record(file=str(audio_path))]
-
-        # 标记事件已完成，防止同事件再次进入
-        try:
-            if ek:
-                self._event_guard[ek] = time.time()
-        except Exception:
-            pass
-
-    def _build_tts_sig(self, text: str, vkey: Optional[str], voice: Optional[str], speed: Optional[float]) -> str:
-        """构造一次TTS请求的签名，用于短时间去重。"""
-        try:
-            payload = {
-                "t": (text or "")[:200],  # 取前200字符足够判等
-                "vk": vkey or "",
-                "v": voice or "",
-                "s": None if speed is None else float(speed),
-            }
-            s = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-            return hashlib.sha1(s.encode("utf-8")).hexdigest()
-        except Exception:
-            return f"fallback:{(text or '')[:60]}:{vkey}:{speed}"
-
-    def _build_text_sig(self, text: str) -> str:
-        """对文本做宽松规范化后计算签名：
-        - 去不可见字符与BOM
-        - 去掉开头@/回复@前缀
-        - 合并空白、去常见标点、转小写
-        - 截取前200字符再hash
-        """
-        try:
-            t = self._normalize_text(text or "")
-            t = self._strip_leading_mentions(t)
-            t = re.sub(r"\s+", " ", t).strip().lower()
-            # 去常见中英文标点，避免仅标点差异造成重复
-            t = re.sub(r"[，。,.!？?…~:：;；\-—\"“”'‘’()（）\[\]【】<>《》@#]", "", t)
-            t = t[:200]
-            return hashlib.sha1(t.encode("utf-8")).hexdigest()
-        except Exception:
-            return f"txtsig:{(text or '')[:60]}"
