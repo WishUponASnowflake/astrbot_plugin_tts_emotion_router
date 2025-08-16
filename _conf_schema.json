@@ -1,141 +1,59 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-
-import json
-import logging
-import random
-import re
-import time
-import hashlib
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Optional
-
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
-from astrbot.api.message_components import Record, Plain
-from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.api.provider import LLMResponse
-
-from .emotion.infer import EMOTIONS
-from .emotion.classifier import HeuristicClassifier  # LLMClassifier 不再使用
-from .tts.provider_siliconflow import SiliconFlowTTS
-from .utils.audio import ensure_dir, cleanup_dir
-
-CONFIG_FILE = Path(__file__).parent / "config.json"  # 旧版本地文件，作为迁移来源
-TEMP_DIR = Path(__file__).parent / "temp"
-
-
-@dataclass
-class SessionState:
-    last_ts: float = 0.0
-    pending_emotion: Optional[str] = None  # 基于隐藏标记的待用情绪
-    last_tts_sig: Optional[str] = None     # 上一次发送音频的签名
-    last_tts_time: float = 0.0             # 上一次发送音频的时间戳
-
-
-@register("astrabot_plugin_tts_emotion_router", "木有知", "按情绪路由到不同音色的TTS插件", "0.1.0")
-class TTSEmotionRouter(Star):
-    def __init__(self, context: Context, config: Optional[dict] = None):
-        super().__init__(context)
-        # 1) 首选面板生成的插件配置（data/config/tts_emotion_router_config.json）
-        #    当 _conf_schema.json 存在时，StarManager 会传入 AstrBotConfig
-        if isinstance(config, AstrBotConfig):
-            self.config = config
-            # 若是首次创建且旧版本地 config.json 存在，则迁移一次
-            try:
-                if getattr(self.config, "first_deploy", False) and CONFIG_FILE.exists():
-                    disk = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-                    # 仅拷贝已知字段，避免脏键
-                    for k in [
-                        "global_enable","enabled_sessions","disabled_sessions","prob","text_limit","cooldown","allow_mixed","api","voice_map","emotion","speed_map"
-                    ]:
-                        if k in disk:
-                            self.config[k] = disk[k]
-                    self.config.save_config()
-            except Exception:
-                pass
-        else:
-            # 兼容旧版：直接读写插件目录下的 config.json
-            self.config = self._load_config(config or {})
-
-        api = self.config.get("api", {})
-        api_url = api.get("url", "")
-        api_key = api.get("key", "")
-        api_model = api.get("model", "gpt-tts-pro")
-        api_format = api.get("format", "mp3")  # 默认 mp3，减少部分平台播放噪点
-        api_speed = float(api.get("speed", 1.0))
-        api_gain = float(api.get("gain", 5.0))   # +50% 增益
-        api_sr = int(api.get("sample_rate", 44100 if api_format in ("mp3", "wav") else 48000))
-        # 初始化 TTS 客户端（支持 gain 与 sample_rate）
-        self.tts = SiliconFlowTTS(api_url, api_key, api_model, api_format, api_speed, gain=api_gain, sample_rate=api_sr)
-
-        self.voice_map: Dict[str, str] = self.config.get("voice_map", {})
-        self.speed_map: Dict[str, float] = self.config.get("speed_map", {}) or {}
-        self.global_enable: bool = bool(self.config.get("global_enable", True))
-        self.enabled_sessions: List[str] = list(self.config.get("enabled_sessions", []))
-        self.disabled_sessions: List[str] = list(self.config.get("disabled_sessions", []))
-        self.prob: float = float(self.config.get("prob", 0.35))
-        self.text_limit: int = int(self.config.get("text_limit", 80))
-        self.cooldown: int = int(self.config.get("cooldown", 20))
-        self.allow_mixed: bool = bool(self.config.get("allow_mixed", False))
-        # 情绪分类：仅启发式 + 隐藏标记
-        emo_cfg = self.config.get("emotion", {}) or {}
-        self.heuristic_cls = HeuristicClassifier()
-        # 标记驱动配置（不与表情包插件冲突：仅识别 [EMO:happy] 这类专属标记）
-        marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
-        self.emo_marker_enable: bool = bool(marker_cfg.get("enable", True))  # 默认开启
-        self.emo_marker_tag: str = str(marker_cfg.get("tag", "EMO"))
-        try:
-            tag = re.escape(self.emo_marker_tag)
-            self._emo_marker_re = re.compile(rf"\[\s*{tag}\s*:\s*(happy|sad|angry|neutral)\s*\]", re.I)
-        except Exception:
-            self._emo_marker_re = None
-        # 额外：更宽松的去除规则（允许 [EMO] / [EMO:] / 全角【EMO】 以及纯单词 emo 开头等变体）
-        try:
-            tag = re.escape(self.emo_marker_tag)
-            # 允许“:[label]”可缺省label，接受半/全角冒号及连字符，锚定开头以仅清理头部
-            self._emo_marker_re_any = re.compile(
-                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*(?:[:：-]\s*[a-z]*)?\s*[\]\)】]",
-                re.I,
-            )
-            # 头部 token：支持 [EMO] / [EMO:] / 【EMO：】 / emo / emo:happy / 等，label 可缺省（限定四选一）
-            self._emo_head_token_re = re.compile(
-                rf"^[\s\ufeff]*(?:[\[\(【]\s*{tag}\s*(?:[:：-]\s*(?P<lbl>happy|sad|angry|neutral))?\s*[\]\)】]|(?:{tag}|emo)\s*(?:[:：-]\s*(?P<lbl2>happy|sad|angry|neutral))?)\s*[,，。:：-]*\s*",
-                re.I,
-            )
-            # 头部 token（英文任意标签）：如 [EMO:confused]，先取 raw 再做同义词归一化
-            self._emo_head_anylabel_re = re.compile(
-                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*[:：-]\s*(?P<raw>[a-z]+)\s*[\]\)】]",
-                re.I,
-            )
-        except Exception:
-            self._emo_marker_re_any = None
-            self._emo_head_token_re = None
-            self._emo_head_anylabel_re = None
-        
-        self._session_state: Dict[str, SessionState] = {}
-        ensure_dir(TEMP_DIR)
-        cleanup_dir(TEMP_DIR, ttl_seconds=6*3600)
-        
-        # 简单关键词启发，用于无标记时的中性偏置判定
-        try:
-            self._emo_kw = {
-                "happy": re.compile(r"(开心|快乐|高兴|喜悦|愉快|兴奋|喜欢|令人开心|挺好|不错|开心|happy|joy|delight|excited|great|awesome|lol)", re.I),
-                "sad": re.compile(r"(伤心|难过|沮丧|低落|悲伤|哭|流泪|难受|失望|委屈|心碎|sad|depress|upset|unhappy|blue|tear)", re.I),
-                "angry": re.compile(r"(生气|愤怒|火大|恼火|气愤|气死|怒|怒了|生气了|angry|furious|mad|rage|annoyed|irritat)", re.I),
-            }
-        except Exception:
-            self._emo_kw = {
-                "happy": re.compile(r"happy|joy|delight|excited", re.I),
-                "sad": re.compile(r"sad|depress|upset|unhappy", re.I),
-                "angry": re.compile(r"angry|furious|mad|rage", re.I),
-            }
-        self._event_guard: Dict[str, float] = {}
-        # 新增：按群+发送者去重（2秒窗口）
-        self._sender_guard: Dict[str, float] = {}
-        # 新增：同一发送者+同一规范化文本 8 秒内去重（独立于音色/情绪/语速）
-        self._sender_text_guard: Dict[str, tuple[str, float]] = {}
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://astrbot.dev/schemas/astrabot_plugin_tts_emotion_router.schema.json",
+    "title": "astrabot_plugin_tts_emotion_router config schema",
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+        "global_enable": { "type": "boolean", "default": true },
+        "enabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "disabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "prob": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 },
+        "text_limit": { "type": "integer", "minimum": 0, "default": 80 },
+        "cooldown": { "type": "integer", "minimum": 0, "default": 20 },
+        "allow_mixed": { "type": "boolean", "default": false },
+        "cleanup_delay": { "type": "integer", "minimum": 0, "default": 120 },
+        "api": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+                "url": { "type": "string", "description": "SiliconFlow API base URL" },
+                "key": { "type": "string", "description": "SiliconFlow API key (use env SILICONFLOW_API_KEY if empty)" },
+                "model": { "type": "string", "default": "gpt-tts-pro" },
+                "format": { "type": "string", "enum": ["wav", "mp3", "aac", "opus"], "default": "wav" },
+                "speed": { "type": "number", "default": 1.05 },
+                "gain": { "type": "number", "default": 0.0 },
+                "sample_rate": { "type": "integer", "default": 24000 }
+            },
+            "required": ["url", "key", "model"]
+        },
+        "voice_map": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "emotion -> voice URI mapping; at least provide 'neutral'"
+        },
+        "speed_map": {
+            "type": "object",
+            "additionalProperties": { "type": ["number", "string"] },
+            "description": "emotion -> speed multiplier"
+        },
+        "emotion": {
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "object",
+                    "properties": {
+                        "enable": { "type": "boolean", "default": true },
+                        "tag": { "type": "string", "default": "EMO" },
+                        "prompt_hint": { "type": "string" }
+                    },
+                    "additionalProperties": true
+                }
+            },
+            "additionalProperties": true
+        }
+    }
+}
 
     # ---------------- helpers -----------------
     def _event_key(self, event: AstrMessageEvent) -> Optional[str]:
