@@ -1,7 +1,7 @@
 {
   "global_enable": { "type": "bool", "default": true },
-  "enabled_sessions": { "type": "list", "items": { "type": "string" }, "default": [] },
-  "disabled_sessions": { "type": "list", "items": { "type": "string" }, "default": [] },
+  "enabled_sessions": { "type": "text", "default": "" },
+  "disabled_sessions": { "type": "text", "default": "" },
   "prob": { "type": "float", "default": 0.35, "min": 0, "max": 1 },
   "text_limit": { "type": "int", "default": 80, "min": 0 },
   "cooldown": { "type": "int", "default": 20, "min": 0 },
