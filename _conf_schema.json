@@ -1,56 +1,40 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://astrbot.dev/schemas/astrabot_plugin_tts_emotion_router.schema.json",
-  "title": "astrabot_plugin_tts_emotion_router config schema",
-  "type": "object",
-  "additionalProperties": true,
-  "properties": {
-    "global_enable": { "type": "boolean", "default": true },
-    "enabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
-    "disabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
-    "prob": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 },
-    "text_limit": { "type": "integer", "minimum": 0, "default": 80 },
-    "cooldown": { "type": "integer", "minimum": 0, "default": 20 },
-    "allow_mixed": { "type": "boolean", "default": false },
-    "cleanup_delay": { "type": "integer", "minimum": 0, "default": 120 },
-    "api": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "url": { "type": "string", "description": "SiliconFlow API base URL" },
-        "key": { "type": "string", "description": "SiliconFlow API key (use env SILICONFLOW_API_KEY if empty)" },
-        "model": { "type": "string", "default": "gpt-tts-pro" },
-        "format": { "type": "string", "enum": ["wav", "mp3", "aac", "opus"], "default": "wav" },
-        "speed": { "type": "number", "default": 1.05 },
-        "gain": { "type": "number", "default": 0.0 },
-        "sample_rate": { "type": "integer", "default": 24000 }
-      },
-      "required": ["url", "key", "model"]
-    },
-    "voice_map": {
-      "type": "object",
-      "additionalProperties": { "type": "string" },
-      "description": "emotion -> voice URI mapping; at least provide 'neutral'"
-    },
-    "speed_map": {
-      "type": "object",
-      "additionalProperties": { "type": ["number", "string"] },
-      "description": "emotion -> speed multiplier"
-    },
-    "emotion": {
-      "type": "object",
-      "properties": {
-        "marker": {
-          "type": "object",
-          "properties": {
-            "enable": { "type": "boolean", "default": true },
-            "tag": { "type": "string", "default": "EMO" },
-            "prompt_hint": { "type": "string" }
-          },
-          "additionalProperties": true
+  "global_enable": { "type": "boolean", "default": true },
+  "enabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
+  "disabled_sessions": { "type": "array", "items": { "type": "string" }, "default": [] },
+  "prob": { "type": "number", "default": 0.35, "min": 0, "max": 1 },
+  "text_limit": { "type": "integer", "default": 80, "min": 0 },
+  "cooldown": { "type": "integer", "default": 20, "min": 0 },
+  "allow_mixed": { "type": "boolean", "default": false },
+  "cleanup_delay": { "type": "integer", "default": 120, "min": 0 },
+
+  "api": {
+    "type": "object",
+    "properties": {
+      "url": { "type": "string", "default": "" },
+      "key": { "type": "string", "default": "" },
+      "model": { "type": "string", "default": "gpt-tts-pro" },
+      "format": { "type": "string", "default": "wav" },
+      "speed": { "type": "number", "default": 1.05 },
+      "gain": { "type": "number", "default": 0.0 },
+      "sample_rate": { "type": "integer", "default": 24000 }
+    }
+  },
+
+  "voice_map": { "type": "object", "properties": {}, "default": {} },
+  "speed_map": { "type": "object", "properties": {}, "default": {} },
+
+  "emotion": {
+    "type": "object",
+    "properties": {
+      "marker": {
+        "type": "object",
+        "properties": {
+          "enable": { "type": "boolean", "default": true },
+          "tag": { "type": "string", "default": "EMO" },
+          "prompt_hint": { "type": "string", "default": "" }
         }
-      },
-      "additionalProperties": true
+      }
     }
   }
 }
