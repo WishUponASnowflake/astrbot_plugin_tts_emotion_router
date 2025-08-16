@@ -34,12 +34,7 @@ def classify(text: str, context: Optional[List[str]] = None) -> str:
     # 感叹号、全大写等作为情绪增强
     if text and "!" in text:
         score["angry"] += 1.0
-    if (
-        text
-        and text.strip()
-        and text == text.upper()
-        and any(c.isalpha() for c in text)
-    ):
+    if text and text.strip() and text == text.upper() and any(c.isalpha() for c in text):
         score["angry"] += 1.0
 
     # 上下文弱加权
