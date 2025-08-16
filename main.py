@@ -31,7 +31,12 @@ class SessionState:
     pending_emotion: Optional[str] = None  # 基于隐藏标记的待用情绪
 
 
-@register("astrabot_plugin_tts_emotion_router", "木有知", "按情绪路由到不同音色的TTS插件", "0.1.0")
+@register(
+    "astrabot_plugin_tts_emotion_router",
+    "木有知",
+    "按情绪路由到不同音色的TTS插件",
+    "0.1.0",
+)
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
         super().__init__(context)
@@ -45,7 +50,17 @@ class TTSEmotionRouter(Star):
                     disk = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
                     # 仅拷贝已知字段，避免脏键
                     for k in [
-                        "global_enable","enabled_sessions","disabled_sessions","prob","text_limit","cooldown","allow_mixed","api","voice_map","emotion","speed_map"
+                        "global_enable",
+                        "enabled_sessions",
+                        "disabled_sessions",
+                        "prob",
+                        "text_limit",
+                        "cooldown",
+                        "allow_mixed",
+                        "api",
+                        "voice_map",
+                        "emotion",
+                        "speed_map",
                     ]:
                         if k in disk:
                             self.config[k] = disk[k]
@@ -62,16 +77,28 @@ class TTSEmotionRouter(Star):
         api_model = api.get("model", "gpt-tts-pro")
         api_format = api.get("format", "mp3")  # 默认 mp3，减少部分平台播放噪点
         api_speed = float(api.get("speed", 1.0))
-        api_gain = float(api.get("gain", 5.0))   # +50% 增益
-        api_sr = int(api.get("sample_rate", 44100 if api_format in ("mp3", "wav") else 48000))
+        api_gain = float(api.get("gain", 5.0))  # +50% 增益
+        api_sr = int(
+            api.get("sample_rate", 44100 if api_format in ("mp3", "wav") else 48000)
+        )
         # 初始化 TTS 客户端（支持 gain 与 sample_rate）
-        self.tts = SiliconFlowTTS(api_url, api_key, api_model, api_format, api_speed, gain=api_gain, sample_rate=api_sr)
+        self.tts = SiliconFlowTTS(
+            api_url,
+            api_key,
+            api_model,
+            api_format,
+            api_speed,
+            gain=api_gain,
+            sample_rate=api_sr,
+        )
 
         self.voice_map: Dict[str, str] = self.config.get("voice_map", {})
         self.speed_map: Dict[str, float] = self.config.get("speed_map", {}) or {}
         self.global_enable: bool = bool(self.config.get("global_enable", True))
         self.enabled_sessions: List[str] = list(self.config.get("enabled_sessions", []))
-        self.disabled_sessions: List[str] = list(self.config.get("disabled_sessions", []))
+        self.disabled_sessions: List[str] = list(
+            self.config.get("disabled_sessions", [])
+        )
         self.prob: float = float(self.config.get("prob", 0.35))
         self.text_limit: int = int(self.config.get("text_limit", 80))
         self.cooldown: int = int(self.config.get("cooldown", 20))
@@ -85,7 +112,9 @@ class TTSEmotionRouter(Star):
         self.emo_marker_tag: str = str(marker_cfg.get("tag", "EMO"))
         try:
             tag = re.escape(self.emo_marker_tag)
-            self._emo_marker_re = re.compile(rf"\[\s*{tag}\s*:\s*(happy|sad|angry|neutral)\s*\]", re.I)
+            self._emo_marker_re = re.compile(
+                rf"\[\s*{tag}\s*:\s*(happy|sad|angry|neutral)\s*\]", re.I
+            )
         except Exception:
             self._emo_marker_re = None
         # 额外：更宽松的去除规则（允许 [EMO] / [EMO:] / 全角【EMO】 以及纯单词 emo 开头等变体）
@@ -110,17 +139,26 @@ class TTSEmotionRouter(Star):
             self._emo_marker_re_any = None
             self._emo_head_token_re = None
             self._emo_head_anylabel_re = None
-        
+
         self._session_state: Dict[str, SessionState] = {}
         ensure_dir(TEMP_DIR)
-        cleanup_dir(TEMP_DIR, ttl_seconds=6*3600)
-        
+        cleanup_dir(TEMP_DIR, ttl_seconds=6 * 3600)
+
         # 简单关键词启发，用于无标记时的中性偏置判定
         try:
             self._emo_kw = {
-                "happy": re.compile(r"(开心|快乐|高兴|喜悦|愉快|兴奋|喜欢|令人开心|挺好|不错|开心|happy|joy|delight|excited|great|awesome|lol)", re.I),
-                "sad": re.compile(r"(伤心|难过|沮丧|低落|悲伤|哭|流泪|难受|失望|委屈|心碎|sad|depress|upset|unhappy|blue|tear)", re.I),
-                "angry": re.compile(r"(生气|愤怒|火大|恼火|气愤|气死|怒|怒了|生气了|angry|furious|mad|rage|annoyed|irritat)", re.I),
+                "happy": re.compile(
+                    r"(开心|快乐|高兴|喜悦|愉快|兴奋|喜欢|令人开心|挺好|不错|开心|happy|joy|delight|excited|great|awesome|lol)",
+                    re.I,
+                ),
+                "sad": re.compile(
+                    r"(伤心|难过|沮丧|低落|悲伤|哭|流泪|难受|失望|委屈|心碎|sad|depress|upset|unhappy|blue|tear)",
+                    re.I,
+                ),
+                "angry": re.compile(
+                    r"(生气|愤怒|火大|恼火|气愤|气死|怒|怒了|生气了|angry|furious|mad|rage|annoyed|irritat)",
+                    re.I,
+                ),
             }
         except Exception:
             self._emo_kw = {
@@ -141,7 +179,9 @@ class TTSEmotionRouter(Star):
             disk = {}
         merged = {**disk, **(cfg or {})}
         try:
-            CONFIG_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+            CONFIG_FILE.write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         except Exception:
             pass
         return merged
@@ -152,7 +192,10 @@ class TTSEmotionRouter(Star):
             self.config.save_config()
         else:
             try:
-                CONFIG_FILE.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
+                CONFIG_FILE.write_text(
+                    json.dumps(self.config, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
             except Exception:
                 pass
 
@@ -177,8 +220,16 @@ class TTSEmotionRouter(Star):
             return text
         invisibles = [
             "\ufeff",  # BOM
-            "\u200b", "\u200c", "\u200d", "\u200e", "\u200f",  # ZW* & RTL/LTR marks
-            "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",  # directional marks
+            "\u200b",
+            "\u200c",
+            "\u200d",
+            "\u200e",
+            "\u200f",  # ZW* & RTL/LTR marks
+            "\u202a",
+            "\u202b",
+            "\u202c",
+            "\u202d",
+            "\u202e",  # directional marks
         ]
         for ch in invisibles:
             text = text.replace(ch, "")
@@ -189,27 +240,81 @@ class TTSEmotionRouter(Star):
         例：confused->neutral，upset->sad，furious->angry，delighted->happy 等。"""
         if not label:
             return None
-        l = label.strip().lower()
+        lbl = label.strip().lower()
         mapping = {
             "happy": {
-                "happy", "joy", "joyful", "cheerful", "delighted", "excited", "smile", "positive",
-                "开心", "快乐", "高兴", "喜悦", "兴奋", "愉快",
+                "happy",
+                "joy",
+                "joyful",
+                "cheerful",
+                "delighted",
+                "excited",
+                "smile",
+                "positive",
+                "开心",
+                "快乐",
+                "高兴",
+                "喜悦",
+                "兴奋",
+                "愉快",
             },
             "sad": {
-                "sad", "sorrow", "sorrowful", "depressed", "down", "unhappy", "cry", "crying", "tearful", "blue", "upset",
-                "伤心", "难过", "沮丧", "低落", "悲伤", "流泪",
+                "sad",
+                "sorrow",
+                "sorrowful",
+                "depressed",
+                "down",
+                "unhappy",
+                "cry",
+                "crying",
+                "tearful",
+                "blue",
+                "upset",
+                "伤心",
+                "难过",
+                "沮丧",
+                "低落",
+                "悲伤",
+                "流泪",
             },
             "angry": {
-                "angry", "mad", "furious", "annoyed", "irritated", "rage", "rageful", "wrath",
-                "生气", "愤怒", "恼火", "气愤",
+                "angry",
+                "mad",
+                "furious",
+                "annoyed",
+                "irritated",
+                "rage",
+                "rageful",
+                "wrath",
+                "生气",
+                "愤怒",
+                "恼火",
+                "气愤",
             },
             "neutral": {
-                "neutral", "calm", "plain", "normal", "objective", "ok", "fine", "meh", "average", "confused", "uncertain", "unsure",
-                "平静", "冷静", "一般", "中立", "客观", "困惑", "迷茫",
+                "neutral",
+                "calm",
+                "plain",
+                "normal",
+                "objective",
+                "ok",
+                "fine",
+                "meh",
+                "average",
+                "confused",
+                "uncertain",
+                "unsure",
+                "平静",
+                "冷静",
+                "一般",
+                "中立",
+                "客观",
+                "困惑",
+                "迷茫",
             },
         }
         for k, vs in mapping.items():
-            if l in vs:
+            if lbl in vs:
                 return k
         return None
 
@@ -244,7 +349,7 @@ class TTSEmotionRouter(Star):
         if self._emo_head_token_re:
             m = self._emo_head_token_re.match(text)
             if m:
-                label = (m.group('lbl') or m.group('lbl2') or "").lower()
+                label = (m.group("lbl") or m.group("lbl2") or "").lower()
                 if label not in EMOTIONS:
                     label = None
                 cleaned = self._emo_head_token_re.sub("", text, count=1)
@@ -253,7 +358,7 @@ class TTSEmotionRouter(Star):
         if self._emo_head_anylabel_re:
             m2 = self._emo_head_anylabel_re.match(text)
             if m2:
-                raw = (m2.group('raw') or "").lower()
+                raw = (m2.group("raw") or "").lower()
                 label = self._normalize_label(raw)
                 cleaned = self._emo_head_anylabel_re.sub("", text, count=1)
                 return cleaned.strip(), label
@@ -321,7 +426,11 @@ class TTSEmotionRouter(Star):
                 new_chain = []
                 cleaned_once = False
                 for comp in rc.chain:
-                    if not cleaned_once and isinstance(comp, Plain) and getattr(comp, "text", None):
+                    if (
+                        not cleaned_once
+                        and isinstance(comp, Plain)
+                        and getattr(comp, "text", None)
+                    ):
                         t0 = self._normalize_text(comp.text)
                         t, l2 = self._strip_emo_head_many(t0)
                         if l2 in EMOTIONS and label is None:
@@ -448,7 +557,9 @@ class TTSEmotionRouter(Star):
             yield event.plain_result("用法：tts_limit <非负整数>")
 
     @filter.command("tts_cooldown", priority=1)
-    async def tts_cooldown(self, event: AstrMessageEvent, *, value: Optional[str] = None):
+    async def tts_cooldown(
+        self, event: AstrMessageEvent, *, value: Optional[str] = None
+    ):
         try:
             if value is None:
                 raise ValueError
@@ -488,7 +599,9 @@ class TTSEmotionRouter(Star):
         sid = self._sess_id(event)
         mode = "黑名单(默认开)" if self.global_enable else "白名单(默认关)"
         enabled = self._is_session_enabled(sid)
-        yield event.plain_result(f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s")
+        yield event.plain_result(
+            f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s"
+        )
 
     # ---------------- Core hook -----------------
     @filter.on_decorating_result()
@@ -507,7 +620,11 @@ class TTSEmotionRouter(Star):
             new_chain = []
             cleaned_once = False
             for comp in result.chain:
-                if not cleaned_once and isinstance(comp, Plain) and getattr(comp, "text", None):
+                if (
+                    not cleaned_once
+                    and isinstance(comp, Plain)
+                    and getattr(comp, "text", None)
+                ):
                     t0 = comp.text
                     t0 = self._normalize_text(t0)
                     t, _ = self._strip_emo_head_many(t0)
@@ -525,7 +642,11 @@ class TTSEmotionRouter(Star):
             return
 
         # 拼接纯文本
-        text_parts = [c.text.strip() for c in result.chain if isinstance(c, Plain) and c.text.strip()]
+        text_parts = [
+            c.text.strip()
+            for c in result.chain
+            if isinstance(c, Plain) and c.text.strip()
+        ]
         if not text_parts:
             return
         text = " ".join(text_parts)
@@ -536,7 +657,9 @@ class TTSEmotionRouter(Star):
         text, _ = self._strip_emo_head_many(text)
 
         # 过滤链接/文件等提示性内容，避免朗读
-        if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I):
+        if re.search(
+            r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I
+        ):
             return
 
         # 随机/冷却/长度
@@ -569,7 +692,7 @@ class TTSEmotionRouter(Star):
                     emotion = "neutral"
             except Exception:
                 pass
-        
+
         vkey, voice = self._pick_voice_for_emotion(emotion)
         if not voice:
             logging.warning("No voice mapped for emotion=%s", emotion)
@@ -592,16 +715,25 @@ class TTSEmotionRouter(Star):
             emotion,
             src,
             vkey,
-            (voice[:40] + "...") if isinstance(voice, str) and len(voice) > 43 else voice,
-            speed_override if speed_override is not None else getattr(self.tts, "speed", None),
+            (voice[:40] + "...")
+            if isinstance(voice, str) and len(voice) > 43
+            else voice,
+            speed_override
+            if speed_override is not None
+            else getattr(self.tts, "speed", None),
         )
-        logging.debug("TTS input head(before/after): %r -> %r", orig_text[:60], text[:60])
+        logging.debug(
+            "TTS input head(before/after): %r -> %r", orig_text[:60], text[:60]
+        )
 
         out_dir = TEMP_DIR / sid
         ensure_dir(out_dir)
         # 最后一重防线：若 TTS 前文本仍以 emo/token 开头，强制清理
         try:
-            if text and (text.lower().lstrip().startswith("emo") or text.lstrip().startswith(("[", "【", "("))):
+            if text and (
+                text.lower().lstrip().startswith("emo")
+                or text.lstrip().startswith(("[", "【", "("))
+            ):
                 text, _ = self._strip_emo_head_many(text)
         except Exception:
             pass
