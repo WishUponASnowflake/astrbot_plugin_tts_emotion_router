@@ -14,12 +14,12 @@ class SiliconFlowTTS:
         api_url: str,
         api_key: str,
         model: str,
-        fmt: str = "wav",  # 改为wav默认格式
-        speed: float = 0.9,  # 稍微慢一点
-        max_retries: int = 3,  # 增加重试次数
-        timeout: int = 45,  # 增加超时时间
+        fmt: str = "mp3",
+        speed: float = 1.0,
+        max_retries: int = 2,
+        timeout: int = 30,
         *,
-        gain: float = 0,  # 降低默认增益
+        gain: float = 5.0,
         sample_rate: Optional[int] = None,
     ):
         self.api_url = (api_url or "").rstrip("/")
@@ -36,7 +36,9 @@ class SiliconFlowTTS:
         ct = r.headers.get("Content-Type", "").lower()
         return ct.startswith("audio/") or ct.startswith("application/octet-stream")
 
-    def synth(self, text: str, voice: str, out_dir: Path, speed: Optional[float] = None) -> Optional[Path]:
+    def synth(
+        self, text: str, voice: str, out_dir: Path, speed: Optional[float] = None
+    ) -> Optional[Path]:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.api_url or not self.api_key:
@@ -80,21 +82,14 @@ class SiliconFlowTTS:
         }
         if self.sample_rate:
             payload["sample_rate"] = int(self.sample_rate)
-        
-        # 添加一些可能有助于完整播放的参数
-        if self.format in ("mp3", "wav"):
-            # 对于mp3和wav格式，确保有足够的缓冲
-            payload.setdefault("quality", "high")
-        
-        # 确保文本以句号结尾，有助于TTS完整处理
-        if text and not text.rstrip().endswith(('.', '。', '!', '！', '?', '？')):
-            payload["input"] = text.rstrip() + "。"
 
         last_err = None
         backoff = 1.0
         for attempt in range(1, self.max_retries + 2):  # 尝试(重试N次+首次)=N+1 次
             try:
-                r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=self.timeout)
+                r = requests.post(
+                    url, headers=headers, data=json.dumps(payload), timeout=self.timeout
+                )
                 # 2xx
                 if 200 <= r.status_code < 300:
                     if not self._is_audio_response(r):
@@ -103,22 +98,13 @@ class SiliconFlowTTS:
                             err = r.json()
                         except Exception:
                             err = {"error": r.text[:200]}
-                        logging.error(f"SiliconFlowTTS: 返回非音频内容，code={r.status_code}, detail={err}")
+                        logging.error(
+                            f"SiliconFlowTTS: 返回非音频内容，code={r.status_code}, detail={err}"
+                        )
                         last_err = err
                         break
                     with open(out_path, "wb") as f:
                         f.write(r.content)
-                    
-                    # 验证音频文件大小，确保不是空文件或过小文件
-                    if out_path.stat().st_size < 1024:  # 小于1KB可能有问题
-                        logging.warning(f"SiliconFlowTTS: 生成的音频文件过小 ({out_path.stat().st_size} bytes)")
-                        try:
-                            out_path.unlink()
-                        except Exception:
-                            pass
-                        last_err = "Generated audio file too small"
-                        continue
-                    
                     return out_path
 
                 # 非 2xx
