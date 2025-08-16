@@ -21,8 +21,18 @@
     }
   },
 
-  "voice_map": { "type": "object", "properties": {}, "default": {} },
-  "speed_map": { "type": "object", "properties": {}, "default": {} },
+  "voice_map": { 
+    "type": "object", 
+    "properties": {},
+    "additionalProperties": { "type": "string" },
+    "default": {} 
+  },
+  "speed_map": { 
+    "type": "object", 
+    "properties": {},
+    "additionalProperties": { "type": "number" },
+    "default": {} 
+  },
 
   "emotion": {
     "type": "object",
