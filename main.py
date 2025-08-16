@@ -62,10 +62,10 @@ class TTSEmotionRouter(Star):
         api_url = api.get("url", "")
         api_key = api.get("key", "")
         api_model = api.get("model", "gpt-tts-pro")
-        api_format = api.get("format", "mp3")  # 默认 mp3，减少部分平台播放噪点
-        api_speed = float(api.get("speed", 1.0))
-        api_gain = float(api.get("gain", 5.0))   # +50% 增益
-        api_sr = int(api.get("sample_rate", 44100 if api_format in ("mp3", "wav") else 48000))
+        api_format = api.get("format", "wav")  # 改为wav格式，通常更稳定
+        api_speed = float(api.get("speed", 0.9))  # 稍微慢一点，避免截断
+        api_gain = float(api.get("gain", 3.0))   # 降低增益，避免失真
+        api_sr = int(api.get("sample_rate", 24000 if api_format in ("mp3", "wav") else 24000))  # 降低采样率，提高稳定性
         # 初始化 TTS 客户端（支持 gain 与 sample_rate）
         self.tts = SiliconFlowTTS(api_url, api_key, api_model, api_format, api_speed, gain=api_gain, sample_rate=api_sr)
 
@@ -246,6 +246,48 @@ class TTSEmotionRouter(Star):
             return hashlib.sha1(t.encode("utf-8")).hexdigest()
         except Exception:
             return f"txtsig:{(text or '')[:60]}"
+
+    def _optimize_text_for_tts(self, text: str) -> str:
+        """优化文本以提高TTS质量和完整性"""
+        if not text:
+            return text
+        
+        # 清理多余空白
+        text = re.sub(r"\s+", " ", text).strip()
+        
+        # 处理数字和特殊字符，使其更适合语音合成
+        # 将英文数字转换为中文数字（可选）
+        text = re.sub(r"\b(\d+)\b", lambda m: self._number_to_chinese(m.group(1)), text)
+        
+        # 处理特殊符号
+        text = text.replace("&", "和")
+        text = text.replace("%", "百分之")
+        text = text.replace("@", "at")
+        text = text.replace("#", "井号")
+        
+        # 确保文本以适当的标点结尾
+        if text and not text.rstrip().endswith(('.', '。', '!', '！', '?', '？', '~', '～')):
+            text = text.rstrip() + "。"
+        
+        # 移除可能导致TTS中断的字符
+        text = re.sub(r"[^\u4e00-\u9fff\w\s,.!?。，！？~～:：;；()（）\[\]【】\"\"\"''''-]", "", text)
+        
+        return text
+    
+    def _number_to_chinese(self, num_str: str) -> str:
+        """将数字转换为中文读音（简单版本）"""
+        try:
+            num = int(num_str)
+            if num == 0:
+                return "零"
+            elif num < 10:
+                return ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"][num]
+            elif num < 100:
+                return num_str  # 复杂数字暂时保持原样
+            else:
+                return num_str
+        except:
+            return num_str
 
     # ---------------- Config helpers -----------------
     def _load_config(self, cfg: dict) -> dict:
@@ -601,6 +643,37 @@ class TTSEmotionRouter(Star):
         except Exception:
             yield event.plain_result("用法：tts_gain <-10~10>，例：tts_gain 5")
 
+    @filter.command("tts_format", priority=1)
+    async def tts_format(self, event: AstrMessageEvent, *, value: Optional[str] = None):
+        """切换音频格式。示例：tts_format wav"""
+        try:
+            if value is None:
+                raise ValueError
+            fmt = value.strip().lower()
+            if fmt not in ("wav", "mp3", "aac", "opus"):
+                raise ValueError
+            # 更新配置
+            api_cfg = self.config.get("api", {}) or {}
+            api_cfg["format"] = fmt
+            self.config["api"] = api_cfg
+            self._save_config()
+            yield event.plain_result(f"音频格式已设为 {fmt}（重启后生效）")
+        except Exception:
+            yield event.plain_result("用法：tts_format <wav|mp3|aac|opus>")
+
+    @filter.command("tts_debug", priority=1)
+    async def tts_debug(self, event: AstrMessageEvent):
+        """显示TTS调试信息"""
+        api_cfg = self.config.get("api", {}) or {}
+        debug_info = [
+            f"格式: {api_cfg.get('format', 'wav')}",
+            f"速度: {api_cfg.get('speed', 0.9)}",
+            f"增益: {api_cfg.get('gain', 3.0)} dB",
+            f"采样率: {api_cfg.get('sample_rate', 24000)} Hz",
+            f"模型: {api_cfg.get('model', 'gpt-tts-pro')}",
+        ]
+        yield event.plain_result("TTS参数:\n" + "\n".join(debug_info))
+
     @filter.command("tts_status", priority=1)
     async def tts_status(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
@@ -769,6 +842,10 @@ class TTSEmotionRouter(Star):
                 text, _ = self._strip_emo_head_many(text)
         except Exception:
             pass
+        
+        # 优化文本，确保TTS能完整处理
+        text = self._optimize_text_for_tts(text)
+        
         audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
         if not audio_path:
             logging.error("TTS调用失败，降级为文本")
