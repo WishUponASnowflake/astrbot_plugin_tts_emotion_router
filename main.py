@@ -27,11 +27,13 @@ TEMP_DIR = Path(__file__).parent / "temp"
 
 @dataclass
 class SessionState:
-    last_ts: float = 0.0
+    last_ts: float = 1.0
     pending_emotion: Optional[str] = None  # 基于隐藏标记的待用情绪
+    last_tts_sig: Optional[str] = None     # 上一次发送音频的签名
+    last_tts_time: float = 1.0             # 上一次发送音频的时间戳
 
 
-@register("astrabot_plugin_tts_emotion_router", "木有知", "按情绪路由到不同音色的TTS插件", "0.1.0")
+@register("astrabot_plugin_tts_emotion_router", "木有知", "按情绪路由到不同音色的TTS插件", "2.1.0")
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
         super().__init__(context)
@@ -128,6 +130,150 @@ class TTSEmotionRouter(Star):
                 "sad": re.compile(r"sad|depress|upset|unhappy", re.I),
                 "angry": re.compile(r"angry|furious|mad|rage", re.I),
             }
+        
+        # 去重机制
+        self._event_guard: Dict[str, float] = {}
+        # 按群+发送者去重（2秒窗口）
+        self._sender_guard: Dict[str, float] = {}
+        # 同一发送者+同一规范化文本 8 秒内去重（独立于音色/情绪/语速）
+        self._sender_text_guard: Dict[str, tuple[str, float]] = {}
+
+    # ---------------- helpers -----------------
+    def _event_key(self, event: AstrMessageEvent) -> Optional[str]:
+        """构造事件唯一键，用于避免同一消息事件重复处理。"""
+        try:
+            gid = ""
+            try:
+                gid = event.get_group_id() or ""
+            except Exception:
+                gid = ""
+            sid = ""
+            try:
+                sid = event.get_sender_id() or ""
+            except Exception:
+                sid = ""
+            mid = None
+            for attr in ("get_message_id", "get_msg_id", "message_id", "msg_id"):
+                try:
+                    v = getattr(event, attr)
+                    mid = v() if callable(v) else v
+                    if mid:
+                        break
+                except Exception:
+                    continue
+            base = f"{gid}|{sid}|{mid or ''}"
+            if base.strip("|"):
+                return base
+        except Exception:
+            pass
+        return None
+
+    def _sender_key(self, event: AstrMessageEvent) -> Optional[str]:
+        """构造"群ID|发送者ID"的键，不含消息ID，用于同一发送者短时间重复触发的去重。"""
+        try:
+            gid = ""
+            try:
+                gid = event.get_group_id() or ""
+            except Exception:
+                gid = ""
+            sid = ""
+            try:
+                sid = event.get_sender_id() or ""
+            except Exception:
+                sid = ""
+            base = f"{gid}|{sid}"
+            if base.strip("|"):
+                return base
+        except Exception:
+            pass
+        return None
+
+    def _sweep_event_guard(self):
+        """清理过期的事件去重记录。"""
+        try:
+            now = time.time()
+            for k, ts in list(self._event_guard.items()):
+                if now - ts > 60:
+                    self._event_guard.pop(k, None)
+        except Exception:
+            pass
+
+    def _sweep_sender_guard(self):
+        """清理过期的 sender 去重记录。"""
+        try:
+            now = time.time()
+            for k, ts in list(self._sender_guard.items()):
+                if now - ts > 60:
+                    self._sender_guard.pop(k, None)
+        except Exception:
+            pass
+
+    def _sweep_sender_text_guard(self):
+        """清理过期的 sender+text 去重记录。"""
+        try:
+            now = time.time()
+            for k, v in list(self._sender_text_guard.items()):
+                if not isinstance(v, tuple) or len(v) != 2:
+                    self._sender_text_guard.pop(k, None)
+                    continue
+                _, ts = v
+                if now - ts > 60:
+                    self._sender_text_guard.pop(k, None)
+        except Exception:
+            pass
+
+    def _strip_leading_mentions(self, text: str) -> str:
+        """去掉开头的 @提及 / 回复 @某人 前缀，避免因仅有提及差异而绕过去重或读出无意义内容。"""
+        if not text:
+            return text
+        try:
+            # 连续剥离多重前缀，如："回复 @张三: 回复 @李四， ..."
+            while True:
+                t = text
+                # 形式1：回复 @xxx: / 回复@xxx，/ Re @xxx:
+                t = re.sub(r"^\s*(?:回复|Re|RE)\s*@[^\s:：,，-]+\s*[:：,，-]*\s*", "", t)
+                # 形式2：@xxx: / @xxx： / @xxx，
+                t = re.sub(r"^\s*@[^\s:：,，-]+\s*[:：,，-]*\s*", "", t)
+                if t == text:
+                    break
+                text = t
+        except Exception:
+            pass
+        return text
+
+    def _build_tts_sig(self, text: str, vkey: Optional[str], voice: Optional[str], speed: Optional[float]) -> str:
+        """构造一次TTS请求的签名，用于短时间去重。"""
+        try:
+            import hashlib
+            payload = {
+                "t": (text or "")[:200],  # 取前200字符足够判等
+                "vk": vkey or "",
+                "v": voice or "",
+                "s": None if speed is None else float(speed),
+            }
+            s = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            return hashlib.sha1(s.encode("utf-8")).hexdigest()
+        except Exception:
+            return f"fallback:{(text or '')[:60]}:{vkey}:{speed}"
+
+    def _build_text_sig(self, text: str) -> str:
+        """对文本做宽松规范化后计算签名：
+        - 去不可见字符与BOM
+        - 去掉开头@/回复@前缀
+        - 合并空白、去常见标点、转小写
+        - 截取前200字符再hash
+        """
+        try:
+            import hashlib
+            t = self._normalize_text(text or "")
+            t = self._strip_leading_mentions(t)
+            t = re.sub(r"\s+", " ", t).strip().lower()
+            # 去常见中英文标点，避免仅标点差异造成重复
+            t = re.sub(r"[，。,.!？?…~:：;；\-—\"\"\"'''()（）\[\]【】<>《》@#]", "", t)
+            t = t[:200]
+            return hashlib.sha1(t.encode("utf-8")).hexdigest()
+        except Exception:
+            return f"txtsig:{(text or '')[:60]}"
 
     # ---------------- Config helpers -----------------
     def _load_config(self, cfg: dict) -> dict:
@@ -493,6 +639,35 @@ class TTSEmotionRouter(Star):
     # ---------------- Core hook -----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
+        # 事件级去重：同一消息事件10s内只处理一次
+        ek = None
+        try:
+            ek = self._event_key(event)
+            if ek:
+                self._sweep_event_guard()
+                last = self._event_guard.get(ek)
+                if last and (time.time() - last) < 10:
+                    logging.info("TTS event-dedupe: skip duplicated on same event within 10s")
+                    return
+                # 先占位，避免并发重复进入
+                self._event_guard[ek] = time.time()
+        except Exception:
+            pass
+
+        # 同一群+同一发送者2秒内的重复触发也跳过（处理某些平台双回调/转发导致的重复）
+        try:
+            bk = self._sender_key(event)
+            if bk:
+                self._sweep_sender_guard()
+                now = time.time()
+                lastb = self._sender_guard.get(bk)
+                if lastb and (now - lastb) < 2:
+                    logging.info("TTS sender-dedupe: skip duplicate for same sender within 2s")
+                    return
+                self._sender_guard[bk] = now
+        except Exception:
+            pass
+
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
             return
@@ -511,6 +686,8 @@ class TTSEmotionRouter(Star):
                     t0 = comp.text
                     t0 = self._normalize_text(t0)
                     t, _ = self._strip_emo_head_many(t0)
+                    # 去掉开头的 @提及/回复@某人
+                    t = self._strip_leading_mentions(t)
                     if t:
                         new_chain.append(Plain(text=t))
                     cleaned_once = True
@@ -534,6 +711,25 @@ class TTSEmotionRouter(Star):
         orig_text = text
         text = self._normalize_text(text)
         text, _ = self._strip_emo_head_many(text)
+        # TTS 之前移除开头提及
+        text = self._strip_leading_mentions(text)
+
+        # 同一发送者+同一规范化文本的8秒去重（即使音色/情绪不同也拦）
+        try:
+            bk = self._sender_key(event)
+            if bk:
+                self._sweep_sender_text_guard()
+                tsig = self._build_text_sig(text)
+                now2 = time.time()
+                last = self._sender_text_guard.get(bk)
+                if last and isinstance(last, tuple) and len(last) == 2:
+                    last_sig, last_ts = last
+                    if last_sig == tsig and (now2 - last_ts) < 8:
+                        logging.info("TTS sender-text-dedupe: skip same text for same sender within 8s")
+                        return
+                self._sender_text_guard[bk] = (tsig, now2)
+        except Exception:
+            pass
 
         # 过滤链接/文件等提示性内容，避免朗读
         if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I):
@@ -587,6 +783,13 @@ class TTSEmotionRouter(Star):
         except Exception:
             speed_override = None
 
+        # 去重：相同文本/音色/语速在短时间内只发一次
+        tts_sig = self._build_tts_sig(text, vkey, voice, speed_override)
+        now = time.time()
+        if st.last_tts_sig == tts_sig and (now - st.last_tts_time) < 8:
+            logging.info("TTS dedupe: skip duplicate within 8s, sig=%s", tts_sig[:8])
+            return
+
         logging.info(
             "TTS route: emotion=%s(src=%s) -> %s (%s), speed=%s",
             emotion,
@@ -611,4 +814,13 @@ class TTSEmotionRouter(Star):
             return
 
         st.last_ts = time.time()
+        st.last_tts_sig = tts_sig
+        st.last_tts_time = st.last_ts
         result.chain = [Record(file=str(audio_path))]
+
+        # 标记事件已完成，防止同事件再次进入
+        try:
+            if ek:
+                self._event_guard[ek] = time.time()
+        except Exception:
+            pass
