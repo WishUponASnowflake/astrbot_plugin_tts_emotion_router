@@ -1,5 +1,5 @@
 name: astrabot_plugin_tts_emotion_router
 author: 木有知
 version: 0.1.0
-desc: 按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API）
+desc: 按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，OpenAI 语音接口风格
 repo: https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router
