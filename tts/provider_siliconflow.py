@@ -36,9 +36,7 @@ class SiliconFlowTTS:
         ct = r.headers.get("Content-Type", "").lower()
         return ct.startswith("audio/") or ct.startswith("application/octet-stream")
 
-    def synth(
-        self, text: str, voice: str, out_dir: Path, speed: Optional[float] = None
-    ) -> Optional[Path]:
+    def synth(self, text: str, voice: str, out_dir: Path, speed: Optional[float] = None) -> Optional[Path]:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.api_url or not self.api_key:
@@ -87,9 +85,7 @@ class SiliconFlowTTS:
         backoff = 1.0
         for attempt in range(1, self.max_retries + 2):  # 尝试(重试N次+首次)=N+1 次
             try:
-                r = requests.post(
-                    url, headers=headers, data=json.dumps(payload), timeout=self.timeout
-                )
+                r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=self.timeout)
                 # 2xx
                 if 200 <= r.status_code < 300:
                     if not self._is_audio_response(r):
@@ -98,9 +94,7 @@ class SiliconFlowTTS:
                             err = r.json()
                         except Exception:
                             err = {"error": r.text[:200]}
-                        logging.error(
-                            f"SiliconFlowTTS: 返回非音频内容，code={r.status_code}, detail={err}"
-                        )
+                        logging.error(f"SiliconFlowTTS: 返回非音频内容，code={r.status_code}, detail={err}")
                         last_err = err
                         break
                     with open(out_path, "wb") as f:
