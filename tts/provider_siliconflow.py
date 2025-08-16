@@ -14,12 +14,12 @@ class SiliconFlowTTS:
         api_url: str,
         api_key: str,
         model: str,
-        fmt: str = "mp3",
-        speed: float = 1.0,
-        max_retries: int = 2,
-        timeout: int = 30,
+        fmt: str = "wav",  # 改为wav默认格式
+        speed: float = 0.9,  # 稍微慢一点
+        max_retries: int = 3,  # 增加重试次数
+        timeout: int = 45,  # 增加超时时间
         *,
-        gain: float = 5.0,
+        gain: float = 0,  # 降低默认增益
         sample_rate: Optional[int] = None,
     ):
         self.api_url = (api_url or "").rstrip("/")
@@ -80,6 +80,15 @@ class SiliconFlowTTS:
         }
         if self.sample_rate:
             payload["sample_rate"] = int(self.sample_rate)
+        
+        # 添加一些可能有助于完整播放的参数
+        if self.format in ("mp3", "wav"):
+            # 对于mp3和wav格式，确保有足够的缓冲
+            payload.setdefault("quality", "high")
+        
+        # 确保文本以句号结尾，有助于TTS完整处理
+        if text and not text.rstrip().endswith(('.', '。', '!', '！', '?', '？')):
+            payload["input"] = text.rstrip() + "。"
 
         last_err = None
         backoff = 1.0
@@ -99,6 +108,17 @@ class SiliconFlowTTS:
                         break
                     with open(out_path, "wb") as f:
                         f.write(r.content)
+                    
+                    # 验证音频文件大小，确保不是空文件或过小文件
+                    if out_path.stat().st_size < 1024:  # 小于1KB可能有问题
+                        logging.warning(f"SiliconFlowTTS: 生成的音频文件过小 ({out_path.stat().st_size} bytes)")
+                        try:
+                            out_path.unlink()
+                        except Exception:
+                            pass
+                        last_err = "Generated audio file too small"
+                        continue
+                    
                     return out_path
 
                 # 非 2xx
