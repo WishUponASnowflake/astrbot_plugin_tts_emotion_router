@@ -49,8 +49,10 @@
       "url": { "description": "API Base", "type": "string", "default": "https://api.siliconflow.cn/v1" },
       "key": { "description": "API Key", "type": "string", "default": "" },
       "model": { "description": "模型名称", "type": "string", "default": "FunAudioLLM/CosyVoice2-0.5B" },
-      "format": { "description": "音频格式", "type": "string", "default": "wav" },
-      "speed": { "description": "默认语速", "type": "float", "default": 1.0 }
+      "format": { "description": "音频格式(mp3/wav/opus/pcm)", "type": "string", "default": "mp3" },
+      "speed": { "description": "默认语速", "type": "float", "default": 1.0 },
+      "gain": { "description": "音量增益（dB，-10~10）", "type": "float", "default": 5.0 },
+      "sample_rate": { "description": "采样率(mp3/wav推荐44100，opus固定48000)", "type": "int", "default": 44100 }
     }
   },
   "emotion": {
@@ -61,12 +63,12 @@
         "description": "隐藏情绪标记（不对用户可见）",
         "type": "object",
         "items": {
-          "enable": { "description": "启用隐藏标记解析", "type": "bool", "default": false },
+          "enable": { "description": "启用隐藏标记解析", "type": "bool", "default": true },
           "tag": { "description": "标记名（如 EMO，对应 [EMO:happy]）", "type": "string", "default": "EMO" },
           "prompt_hint": {
-            "description": "可复制到人格/系统提示：请在每次回复末尾追加形如 [EMO:<happy|sad|angry|neutral>] 的隐藏标记，用于语音情绪与语速路由。标记会被系统自动移除，不会对用户可见。",
+            "description": "系统会自动在请求前注入 ‘请先输出隐藏情绪标记 [EMO:happy|sad|angry|neutral] 再答复’ 的提示。",
             "type": "string",
-            "default": "请在每次回复末尾追加形如 [EMO:<happy|sad|angry|neutral>] 的隐藏标记。该标记仅供系统解析，不会展示给用户。"
+            "default": "请在每次回复开头先输出隐藏情绪标记 [EMO:happy|sad|angry|neutral]，该标记仅供系统解析，不会展示给用户。"
           }
         }
       }
