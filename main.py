@@ -27,10 +27,10 @@ TEMP_DIR = Path(__file__).parent / "temp"
 
 @dataclass
 class SessionState:
-    last_ts: float = 1.0
+    last_ts: float = 0.0
     pending_emotion: Optional[str] = None  # 基于隐藏标记的待用情绪
     last_tts_sig: Optional[str] = None     # 上一次发送音频的签名
-    last_tts_time: float = 1.0             # 上一次发送音频的时间戳
+    last_tts_time: float = 0.0             # 上一次发送音频的时间戳
 
 
 @register("astrabot_plugin_tts_emotion_router", "木有知", "按情绪路由到不同音色的TTS插件", "2.1.0")
@@ -131,12 +131,8 @@ class TTSEmotionRouter(Star):
                 "angry": re.compile(r"angry|furious|mad|rage", re.I),
             }
         
-        # 去重机制
+        # 去重机制 - 简化版
         self._event_guard: Dict[str, float] = {}
-        # 按群+发送者去重（2秒窗口）
-        self._sender_guard: Dict[str, float] = {}
-        # 同一发送者+同一规范化文本 8 秒内去重（独立于音色/情绪/语速）
-        self._sender_text_guard: Dict[str, tuple[str, float]] = {}
 
     # ---------------- helpers -----------------
     def _event_key(self, event: AstrMessageEvent) -> Optional[str]:
@@ -195,30 +191,6 @@ class TTSEmotionRouter(Star):
             for k, ts in list(self._event_guard.items()):
                 if now - ts > 60:
                     self._event_guard.pop(k, None)
-        except Exception:
-            pass
-
-    def _sweep_sender_guard(self):
-        """清理过期的 sender 去重记录。"""
-        try:
-            now = time.time()
-            for k, ts in list(self._sender_guard.items()):
-                if now - ts > 60:
-                    self._sender_guard.pop(k, None)
-        except Exception:
-            pass
-
-    def _sweep_sender_text_guard(self):
-        """清理过期的 sender+text 去重记录。"""
-        try:
-            now = time.time()
-            for k, v in list(self._sender_text_guard.items()):
-                if not isinstance(v, tuple) or len(v) != 2:
-                    self._sender_text_guard.pop(k, None)
-                    continue
-                _, ts = v
-                if now - ts > 60:
-                    self._sender_text_guard.pop(k, None)
         except Exception:
             pass
 
@@ -639,32 +611,18 @@ class TTSEmotionRouter(Star):
     # ---------------- Core hook -----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
-        # 事件级去重：同一消息事件10s内只处理一次
+        # 简化的事件去重：同一消息事件5s内只处理一次
         ek = None
         try:
             ek = self._event_key(event)
             if ek:
                 self._sweep_event_guard()
                 last = self._event_guard.get(ek)
-                if last and (time.time() - last) < 10:
-                    logging.info("TTS event-dedupe: skip duplicated on same event within 10s")
+                if last and (time.time() - last) < 5:
+                    logging.debug("TTS: skip duplicate event within 5s")
                     return
                 # 先占位，避免并发重复进入
                 self._event_guard[ek] = time.time()
-        except Exception:
-            pass
-
-        # 同一群+同一发送者2秒内的重复触发也跳过（处理某些平台双回调/转发导致的重复）
-        try:
-            bk = self._sender_key(event)
-            if bk:
-                self._sweep_sender_guard()
-                now = time.time()
-                lastb = self._sender_guard.get(bk)
-                if lastb and (now - lastb) < 2:
-                    logging.info("TTS sender-dedupe: skip duplicate for same sender within 2s")
-                    return
-                self._sender_guard[bk] = now
         except Exception:
             pass
 
@@ -706,6 +664,10 @@ class TTSEmotionRouter(Star):
         if not text_parts:
             return
         text = " ".join(text_parts)
+        
+        # 基础文本检查
+        if not text or not text.strip():
+            return
 
         # 归一化 + 连续剥离（终极兜底）
         orig_text = text
@@ -713,26 +675,25 @@ class TTSEmotionRouter(Star):
         text, _ = self._strip_emo_head_many(text)
         # TTS 之前移除开头提及
         text = self._strip_leading_mentions(text)
-
-        # 同一发送者+同一规范化文本的8秒去重（即使音色/情绪不同也拦）
-        try:
-            bk = self._sender_key(event)
-            if bk:
-                self._sweep_sender_text_guard()
-                tsig = self._build_text_sig(text)
-                now2 = time.time()
-                last = self._sender_text_guard.get(bk)
-                if last and isinstance(last, tuple) and len(last) == 2:
-                    last_sig, last_ts = last
-                    if last_sig == tsig and (now2 - last_ts) < 8:
-                        logging.info("TTS sender-text-dedupe: skip same text for same sender within 8s")
-                        return
-                self._sender_text_guard[bk] = (tsig, now2)
-        except Exception:
-            pass
+        
+        # 清理后再次检查文本是否有效
+        if not text or not text.strip():
+            return
 
         # 过滤链接/文件等提示性内容，避免朗读
-        if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I):
+        if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\]|\.jpg|\.png|\.gif|\.jpeg|\.webp|\.mp4|\.avi|\.mov|\.pdf|\.doc|\.txt|\.zip|\.rar)", text, re.I):
+            return
+            
+        # 过滤纯文件扩展名或路径或单个词
+        if re.match(r"^\s*(\.(jpg|png|gif|jpeg|webp|mp4|avi|mov|pdf|doc|txt|zip|rar)|jpg|png|gif|jpeg|webp)\s*$", text, re.I):
+            return
+            
+        # 过滤太短的文本（可能是无意义的输出）
+        if len(text.strip()) < 2:
+            return
+            
+        # 过滤纯符号或数字
+        if re.match(r"^\s*[^\w\u4e00-\u9fff]*\s*$", text) or re.match(r"^\s*\d+\s*$", text):
             return
 
         # 随机/冷却/长度
@@ -783,11 +744,11 @@ class TTSEmotionRouter(Star):
         except Exception:
             speed_override = None
 
-        # 去重：相同文本/音色/语速在短时间内只发一次
+        # 简单的TTS去重：相同文本内容3秒内只生成一次
         tts_sig = self._build_tts_sig(text, vkey, voice, speed_override)
         now = time.time()
-        if st.last_tts_sig == tts_sig and (now - st.last_tts_time) < 8:
-            logging.info("TTS dedupe: skip duplicate within 8s, sig=%s", tts_sig[:8])
+        if st.last_tts_sig == tts_sig and (now - st.last_tts_time) < 3:
+            logging.debug("TTS: skip duplicate TTS within 3s")
             return
 
         logging.info(
@@ -817,10 +778,3 @@ class TTSEmotionRouter(Star):
         st.last_tts_sig = tts_sig
         st.last_tts_time = st.last_ts
         result.chain = [Record(file=str(audio_path))]
-
-        # 标记事件已完成，防止同事件再次进入
-        try:
-            if ek:
-                self._event_guard[ek] = time.time()
-        except Exception:
-            pass
