@@ -1,50 +1,97 @@
 {
-  "global_enable": { "type": "bool", "default": true },
-  "enabled_sessions": { "type": "text", "default": "" },
-  "disabled_sessions": { "type": "text", "default": "" },
-  "prob": { "type": "float", "default": 0.35, "min": 0, "max": 1 },
-  "text_limit": { "type": "int", "default": 80, "min": 0 },
-  "cooldown": { "type": "int", "default": 20, "min": 0 },
-  "allow_mixed": { "type": "bool", "default": false },
-  "cleanup_delay": { "type": "int", "default": 120, "min": 0 },
-
+  "global_enable": {
+    "description": "全局开关（黑名单模式）",
+    "type": "bool",
+    "hint": "true=默认启用，使用 disabled_sessions 拉黑；false=默认关闭，使用 enabled_sessions 放行",
+    "default": true
+  },
+  "enabled_sessions": {
+    "description": "白名单会话（仅在全局关闭时生效）",
+    "type": "list",
+    "items": { "type": "string" },
+    "hint": "如 user_123 或 group_456",
+    "default": []
+  },
+  "disabled_sessions": {
+    "description": "黑名单会话（仅在全局开启时生效）",
+    "type": "list",
+    "items": { "type": "string" },
+    "hint": "如 user_123 或 group_456",
+    "default": []
+  },
+  "prob": {
+    "description": "触发概率",
+    "type": "float",
+    "hint": "0~1 之间",
+    "default": 1.0
+  },
+  "text_limit": {
+    "description": "最大文本长度",
+    "type": "int",
+    "hint": "超过将不触发TTS",
+    "default": 200
+  },
+  "cooldown": {
+    "description": "冷却时间（秒）",
+    "type": "int",
+    "hint": "两次触发最短间隔",
+    "default": 0
+  },
+  "allow_mixed": {
+    "description": "允许混合内容（非纯文本消息也尝试TTS）",
+    "type": "bool",
+    "default": false
+  },
   "api": {
+    "description": "硅基流动 API 设置",
     "type": "object",
-    "properties": {
-      "url": { "type": "string", "default": "" },
-      "key": { "type": "string", "default": "" },
-      "model": { "type": "string", "default": "gpt-tts-pro" },
-      "format": { "type": "string", "default": "wav" },
-      "speed": { "type": "float", "default": 1.05 },
-      "gain": { "type": "float", "default": 0.0 },
-      "sample_rate": { "type": "int", "default": 24000 }
+    "items": {
+      "url": { "description": "API Base", "type": "string", "default": "https://api.siliconflow.cn/v1" },
+      "key": { "description": "API Key", "type": "string", "default": "" },
+      "model": { "description": "模型名称", "type": "string", "default": "FunAudioLLM/CosyVoice2-0.5B" },
+      "format": { "description": "音频格式(mp3/wav/opus/pcm)", "type": "string", "default": "mp3" },
+      "speed": { "description": "默认语速", "type": "float", "default": 1.0 },
+      "gain": { "description": "音量增益（dB，-10~10）", "type": "float", "default": 5.0 },
+      "sample_rate": { "description": "采样率(mp3/wav推荐44100，opus固定48000)", "type": "int", "default": 44100 }
     }
   },
-
-  "voice_map": { 
-    "type": "object", 
-    "properties": {},
-    "additionalProperties": { "type": "string" },
-    "default": {} 
-  },
-  "speed_map": { 
-    "type": "object", 
-    "properties": {},
-    "additionalProperties": { "type": "number" },
-    "default": {} 
-  },
-
   "emotion": {
+    "description": "情绪策略（隐藏标记 + 启发式）",
     "type": "object",
-    "properties": {
+    "items": {
       "marker": {
+        "description": "隐藏情绪标记（不对用户可见）",
         "type": "object",
-        "properties": {
-          "enable": { "type": "bool", "default": true },
-          "tag": { "type": "string", "default": "EMO" },
-          "prompt_hint": { "type": "string", "default": "" }
+        "items": {
+          "enable": { "description": "启用隐藏标记解析", "type": "bool", "default": true },
+          "tag": { "description": "标记名（如 EMO，对应 [EMO:happy]）", "type": "string", "default": "EMO" },
+          "prompt_hint": {
+            "description": "系统会自动在请求前注入 ‘请先输出隐藏情绪标记 [EMO:happy|sad|angry|neutral] 再答复’ 的提示。",
+            "type": "string",
+            "default": "请在每次回复开头先输出隐藏情绪标记 [EMO:happy|sad|angry|neutral]，该标记仅供系统解析，不会展示给用户。"
+          }
         }
       }
+    }
+  },
+  "voice_map": {
+    "description": "情绪到音色映射",
+    "type": "object",
+    "items": {
+      "neutral": { "description": "中性音色", "type": "string", "default": "" },
+      "happy": { "description": "高兴音色", "type": "string", "default": "" },
+      "sad": { "description": "伤心音色", "type": "string", "default": "" },
+      "angry": { "description": "愤怒音色", "type": "string", "default": "" }
+    }
+  },
+  "speed_map": {
+    "description": "情绪到语速倍率映射（留空使用默认语速）",
+    "type": "object",
+    "items": {
+      "neutral": { "description": "中性语速(1.0=默认)", "type": "float", "default": 1.0 },
+      "happy": { "description": "高兴语速", "type": "float", "default": 1.2 },
+      "sad": { "description": "伤心语速", "type": "float", "default": 0.85 },
+      "angry": { "description": "愤怒语速", "type": "float", "default": 1.1 }
     }
   }
 }
