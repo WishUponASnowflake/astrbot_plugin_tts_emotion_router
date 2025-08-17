@@ -37,6 +37,8 @@
 - 其他
   - `global_enable`、`enabled_sessions`、`disabled_sessions`
   - `prob`、`text_limit`、`cooldown`、`allow_mixed`
+<img width="580" height="1368" alt="PixPin_2025-08-17_23-14-42" src="https://github.com/user-attachments/assets/6a7287a0-36e6-4efb-a43d-c8903ddf54b7" />
+
 
 ## 使用建议
 - 在人格或系统提示末尾加入：
