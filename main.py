@@ -851,10 +851,8 @@ class TTSEmotionRouter(Star):
                     pass
                 try:
                     res = event.get_result()
-                    if res is None:
-                        res = event.make_result()
-                        event.set_result(res)
-                    if hasattr(res, "continue_event"):
+                    # 只读，不创建/修改 result，避免触发重复发送
+                    if res is not None and hasattr(res, "continue_event"):
                         res.continue_event()
                 except Exception:
                     pass
@@ -889,7 +887,6 @@ class TTSEmotionRouter(Star):
                     res = event.get_result()
                     if res is not None and hasattr(res, "continue_event"):
                         res.continue_event()
-                        event.set_result(res)
                 except Exception:
                     pass
                 # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
@@ -915,10 +912,8 @@ class TTSEmotionRouter(Star):
                     pass
                 try:
                     res = event.get_result()
-                    if res is None:
-                        res = event.make_result()
-                        event.set_result(res)
-                    if hasattr(res, "continue_event"):
+                    # 只读，不创建/修改 result，避免触发重复发送
+                    if res is not None and hasattr(res, "continue_event"):
                         res.continue_event()
                 except Exception:
                     pass
@@ -953,7 +948,6 @@ class TTSEmotionRouter(Star):
                     res = event.get_result()
                     if res is not None and hasattr(res, "continue_event"):
                         res.continue_event()
-                        event.set_result(res)
                 except Exception:
                     pass
                 # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
@@ -1152,6 +1146,8 @@ class TTSEmotionRouter(Star):
         except Exception:
             pass
 
+    # 不做生成级去重：重复发送问题通过结果链策略规避
+
         try:
             audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
             if not audio_path:
@@ -1167,7 +1163,11 @@ class TTSEmotionRouter(Star):
             st.last_ts = time.time()
 
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            result.chain = [Plain(text=text), Record(file=str(audio_path))]
+            if self.allow_mixed:
+                result.chain = [Plain(text=text), Record(file=str(audio_path))]
+            else:
+                # 仅发送音频；文本已在 on_llm_response 入库，避免双重发送触发宿主重复播发
+                result.chain = [Record(file=str(audio_path))]
             try:
                 _hp = any(isinstance(c, Plain) for c in result.chain)
                 _hr = any(isinstance(c, Record) for c in result.chain)
@@ -1192,6 +1192,7 @@ class TTSEmotionRouter(Star):
                 result.set_result_content_type(ResultContentType.LLM_RESULT)
             except Exception:
                 pass
+            # 明确声明结果未停止
             try:
                 event.continue_event()
             except Exception:
