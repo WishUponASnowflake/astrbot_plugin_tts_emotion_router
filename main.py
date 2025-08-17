@@ -13,6 +13,7 @@ from pathlib import Path
 import importlib
 from typing import Dict, List, Optional
 
+# ... (保留文件头部所有兼容性导入代码，此处省略以保持清晰)
 def _ensure_compatible_astrbot():
     """确保 astrbot API 兼容；若宿主 astrbot 不满足需要，则回退到插件自带的 AstrBot。"""
     _PLUGIN_DIR = Path(__file__).parent
@@ -65,567 +66,249 @@ try:
 except Exception:
     pass
 
-# 兼容不同 AstrBot 版本的导入：event 可能是模块(event.py)也可能是包(event/)
 try:
-    # 优先常规路径
-    from astrbot.api.event import AstrMessageEvent  # type: ignore
-except Exception:  # pragma: no cover - 旧版本回退
-    from astrbot.core.platform import AstrMessageEvent  # type: ignore
+    from astrbot.api.event import AstrMessageEvent
+except Exception:
+    from astrbot.core.platform import AstrMessageEvent
 
-# 统一获取 filter 装饰器集合：
 try:
-    # 新版通常支持 from astrbot.api.event import filter
-    from astrbot.api.event import filter as filter  # type: ignore
+    from astrbot.api.event import filter
 except Exception:
     try:
-        # 另一些版本可 import 子模块
         import importlib as _importlib
-        filter = _importlib.import_module("astrbot.api.event.filter")  # type: ignore
+        filter = _importlib.import_module("astrbot.api.event.filter")
     except Exception:
-        # 最后回退：用 register 构造一个拥有同名方法的轻量代理
         try:
-            import astrbot.core.star.register as _reg  # type: ignore
+            import astrbot.core.star.register as _reg
 
             class _FilterCompat:
-                def command(self, *a, **k):
-                    return _reg.register_command(*a, **k)
+                def command(self, *a, **k): return _reg.register_command(*a, **k)
+                def on_llm_request(self, *a, **k): return _reg.register_on_llm_request(*a, **k)
+                def on_llm_response(self, *a, **k): return _reg.register_on_llm_response(*a, **k)
+                def on_decorating_result(self, *a, **k): return _reg.register_on_decorating_result(*a, **k)
+                def after_message_sent(self, *a, **k): return _reg.register_after_message_sent(*a, **k)
+                def on_after_message_sent(self, *a, **k): return _reg.register_after_message_sent(*a, **k)
 
-                def on_llm_request(self, *a, **k):
-                    return _reg.register_on_llm_request(*a, **k)
-
-                def on_llm_response(self, *a, **k):
-                    return _reg.register_on_llm_response(*a, **k)
-
-                def on_decorating_result(self, *a, **k):
-                    return _reg.register_on_decorating_result(*a, **k)
-
-                def after_message_sent(self, *a, **k):
-                    return _reg.register_after_message_sent(*a, **k)
-
-                # 兼容某些版本名为 on_after_message_sent
-                def on_after_message_sent(self, *a, **k):
-                    return _reg.register_after_message_sent(*a, **k)
-
-            filter = _FilterCompat()  # type: ignore
-        except Exception as _e:  # 若三种方式均失败，抛出原错误
+            filter = _FilterCompat()
+        except Exception as _e:
             raise _e
+
 from astrbot.api.star import Context, Star, register
-from astrbot.api.message_components import Record, Plain
+from astrbot.api.message_components import Record, Plain, BaseMessageComponent
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.api.provider import LLMResponse
 from astrbot.core.message.message_event_result import ResultContentType
 
 from .emotion.infer import EMOTIONS
-from .emotion.classifier import HeuristicClassifier  # LLMClassifier 不再使用
+from .emotion.classifier import HeuristicClassifier
 from .tts.provider_siliconflow import SiliconFlowTTS
 from .utils.audio import ensure_dir, cleanup_dir
 
-# 记录 astrbot 实际来源，便于远端排查“导入到插件内自带 AstrBot”的问题
 try:
-    import astrbot as _ab_mod  # type: ignore
+    import astrbot as _ab_mod
     logging.info("TTSEmotionRouter: using astrbot from %s", getattr(_ab_mod, "__file__", None))
 except Exception:
     pass
 
-CONFIG_FILE = Path(__file__).parent / "config.json"  # 旧版本地文件，作为迁移来源
+CONFIG_FILE = Path(__file__).parent / "config.json"
 TEMP_DIR = Path(__file__).parent / "temp"
-
 
 @dataclass
 class SessionState:
     last_ts: float = 0.0
-    pending_emotion: Optional[str] = None  # 基于隐藏标记的待用情绪
-    last_tts_content: Optional[str] = None  # 最后生成的TTS内容（防重复）
-    last_tts_time: float = 0.0  # 最后TTS生成时间
-    last_assistant_text: Optional[str] = None  # 最近一次助手可读文本（用于兜底入库）
-    last_assistant_text_time: float = 0.0
-
+    pending_emotion: Optional[str] = None
+    last_tts_content_hash: Optional[str] = None
+    last_tts_time: float = 0.0
 
 @register(
     "astrabot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.1.1",
+    "0.2.0", # 版本升级
 )
 class TTSEmotionRouter(Star):
+    # ... (保留 __init__ 和所有指令处理函数，它们是正确的)
     def __init__(self, context: Context, config: Optional[dict] = None):
         super().__init__(context)
-        # 1) 首选面板生成的插件配置（data/config/tts_emotion_router_config.json）
-        #    当 _conf_schema.json 存在时，StarManager 会传入 AstrBotConfig
         if isinstance(config, AstrBotConfig):
             self.config = config
-            # 若是首次创建且旧版本地 config.json 存在，则迁移一次
             try:
                 if getattr(self.config, "first_deploy", False) and CONFIG_FILE.exists():
                     disk = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-                    # 仅拷贝已知字段，避免脏键
                     for k in [
-                        "global_enable",
-                        "enabled_sessions",
-                        "disabled_sessions",
-                        "prob",
-                        "text_limit",
-                        "cooldown",
-                        "allow_mixed",
-                        "api",
-                        "voice_map",
-                        "emotion",
-                        "speed_map",
+                        "global_enable", "enabled_sessions", "disabled_sessions",
+                        "prob", "text_limit", "cooldown", "allow_mixed", "api",
+                        "voice_map", "emotion", "speed_map"
                     ]:
-                        if k in disk:
-                            self.config[k] = disk[k]
+                        if k in disk: self.config[k] = disk[k]
                     self.config.save_config()
-            except Exception:
-                pass
+            except Exception: pass
         else:
-            # 兼容旧版：直接读写插件目录下的 config.json
             self.config = self._load_config(config or {})
 
         api = self.config.get("api", {})
-        api_url = api.get("url", "")
-        api_key = api.get("key", "")
-        api_model = api.get("model", "gpt-tts-pro")
-        api_format = api.get("format", "mp3")  # 默认 mp3，减少部分平台播放噪点
-        api_speed = float(api.get("speed", 1.0))
-        api_gain = float(api.get("gain", 5.0))  # +50% 增益
-        api_sr = int(
-            api.get("sample_rate", 44100 if api_format in ("mp3", "wav") else 48000)
-        )
-        # 初始化 TTS 客户端（支持 gain 与 sample_rate）
         self.tts = SiliconFlowTTS(
-            api_url,
-            api_key,
-            api_model,
-            api_format,
-            api_speed,
-            gain=api_gain,
-            sample_rate=api_sr,
+            api.get("url", ""), api.get("key", ""), api.get("model", "gpt-tts-pro"),
+            api.get("format", "mp3"), float(api.get("speed", 1.0)),
+            gain=float(api.get("gain", 5.0)),
+            sample_rate=int(api.get("sample_rate", 44100))
         )
 
         self.voice_map: Dict[str, str] = self.config.get("voice_map", {})
         self.speed_map: Dict[str, float] = self.config.get("speed_map", {}) or {}
         self.global_enable: bool = bool(self.config.get("global_enable", True))
         self.enabled_sessions: List[str] = list(self.config.get("enabled_sessions", []))
-        self.disabled_sessions: List[str] = list(
-            self.config.get("disabled_sessions", [])
-        )
+        self.disabled_sessions: List[str] = list(self.config.get("disabled_sessions", []))
         self.prob: float = float(self.config.get("prob", 0.35))
         self.text_limit: int = int(self.config.get("text_limit", 80))
         self.cooldown: int = int(self.config.get("cooldown", 20))
         self.allow_mixed: bool = bool(self.config.get("allow_mixed", False))
-        # 情绪分类：仅启发式 + 隐藏标记
+        
         emo_cfg = self.config.get("emotion", {}) or {}
         self.heuristic_cls = HeuristicClassifier()
-        # 标记驱动配置（不与表情包插件冲突：仅识别 [EMO:happy] 这类专属标记）
         marker_cfg = (emo_cfg.get("marker") or {}) if isinstance(emo_cfg, dict) else {}
-        self.emo_marker_enable: bool = bool(marker_cfg.get("enable", True))  # 默认开启
+        self.emo_marker_enable: bool = bool(marker_cfg.get("enable", True))
         self.emo_marker_tag: str = str(marker_cfg.get("tag", "EMO"))
+        
         try:
             tag = re.escape(self.emo_marker_tag)
-            self._emo_marker_re = re.compile(
-                rf"\[\s*{tag}\s*:\s*(happy|sad|angry|neutral)\s*\]", re.I
-            )
+            self._emo_marker_re = re.compile(rf"\[\s*{tag}\s*:\s*(happy|sad|angry|neutral)\s*\]", re.I)
+            self._emo_marker_re_any = re.compile(rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*(?:[:\uff1a-]\s*[a-z]*)?\s*[\]\)】]", re.I)
+            self._emo_head_token_re = re.compile(rf"^[\s\ufeff]*(?:[\[\(【]\s*{tag}\s*(?:[:\uff1a-]\s*(?P<lbl>happy|sad|angry|neutral))?\s*[\]\)】]|(?:{tag}|emo)\s*(?:[:\uff1a-]\s*(?P<lbl2>happy|sad|angry|neutral))?)\s*[,，。:\uff1a-]*\s*", re.I)
+            self._emo_head_anylabel_re = re.compile(rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*[:\uff1a-]\s*(?P<raw>[a-z]+)\s*[\]\)】]", re.I)
         except Exception:
-            self._emo_marker_re = None
-        # 额外：更宽松的去除规则（允许 [EMO] / [EMO:] / 全角【EMO】 以及纯单词 emo 开头等变体）
-        try:
-            tag = re.escape(self.emo_marker_tag)
-            # 允许“:[label]”可缺省label，接受半/全角冒号及连字符，锚定开头以仅清理头部
-            self._emo_marker_re_any = re.compile(
-                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*(?:[:\uff1a-]\s*[a-z]*)?\s*[\]\)】]",
-                re.I,
-            )
-            # 头部 token：支持 [EMO] / [EMO:] / 【EMO：】 / emo / emo:happy / 等，label 可缺省（限定四选一）
-            self._emo_head_token_re = re.compile(
-                rf"^[\s\ufeff]*(?:[\[\(【]\s*{tag}\s*(?:[:\uff1a-]\s*(?P<lbl>happy|sad|angry|neutral))?\s*[\]\)】]|(?:{tag}|emo)\s*(?:[:\uff1a-]\s*(?P<lbl2>happy|sad|angry|neutral))?)\s*[,，。:\uff1a-]*\s*",
-                re.I,
-            )
-            # 头部 token（英文任意标签）：如 [EMO:confused]，先取 raw 再做同义词归一化
-            self._emo_head_anylabel_re = re.compile(
-                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*[:\uff1a-]\s*(?P<raw>[a-z]+)\s*[\]\)】]",
-                re.I,
-            )
-        except Exception:
-            self._emo_marker_re_any = None
-            self._emo_head_token_re = None
-            self._emo_head_anylabel_re = None
+            self._emo_marker_re, self._emo_marker_re_any, self._emo_head_token_re, self._emo_head_anylabel_re = None, None, None, None
 
         self._session_state: Dict[str, SessionState] = {}
-        # 事件级防重：最近发送签名与进行中签名
-        self._recent_sends: Dict[str, float] = {}
         self._inflight_sigs: set[str] = set()
         ensure_dir(TEMP_DIR)
-        # 初始清理：删除超过2小时的文件
         cleanup_dir(TEMP_DIR, ttl_seconds=2 * 3600)
 
-        # 简单关键词启发，用于无标记时的中性偏置判定
-        try:
-            self._emo_kw = {
-                "happy": re.compile(
-                    r"(开心|快乐|高兴|喜悦|愉快|兴奋|喜欢|令人开心|挺好|不错|开心|happy|joy|delight|excited|great|awesome|lol)",
-                    re.I,
-                ),
-                "sad": re.compile(
-                    r"(伤心|难过|沮丧|低落|悲伤|哭|流泪|难受|失望|委屈|心碎|sad|depress|upset|unhappy|blue|tear)",
-                    re.I,
-                ),
-                "angry": re.compile(
-                    r"(生气|愤怒|火大|恼火|气愤|气死|怒|怒了|生气了|angry|furious|mad|rage|annoyed|irritat)",
-                    re.I,
-                ),
-            }
-        except Exception:
-            self._emo_kw = {
-                "happy": re.compile(r"happy|joy|delight|excited", re.I),
-                "sad": re.compile(r"sad|depress|upset|unhappy", re.I),
-                "angry": re.compile(r"angry|furious|mad|rage", re.I),
-            }
-
-    def _is_our_record(self, comp) -> bool:
-        try:
-            if not isinstance(comp, Record):
-                return False
-            f = getattr(comp, "file", "") or ""
-            if not f:
-                return False
-            fpath = Path(f)
-            return str(fpath).startswith(str((Path(__file__).parent / "temp").resolve()))
-        except Exception:
-            return False
-
-    # ---------------- Config helpers -----------------
     def _load_config(self, cfg: dict) -> dict:
-        # 合并磁盘config与传入config，便于热更
-        try:
-            if CONFIG_FILE.exists():
-                disk = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            else:
-                disk = {}
-        except Exception:
-            disk = {}
+        try: disk = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) if CONFIG_FILE.exists() else {}
+        except Exception: disk = {}
         merged = {**disk, **(cfg or {})}
-        try:
-            CONFIG_FILE.write_text(
-                json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
+        try: CONFIG_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception: pass
         return merged
 
     def _save_config(self):
-        # 面板配置优先保存到 data/config/tts_emotion_router_config.json
-        if isinstance(self.config, AstrBotConfig):
-            self.config.save_config()
+        if isinstance(self.config, AstrBotConfig): self.config.save_config()
         else:
-            try:
-                CONFIG_FILE.write_text(
-                    json.dumps(self.config, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-            except Exception:
-                pass
+            try: CONFIG_FILE.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception: pass
 
     def _sess_id(self, event: AstrMessageEvent) -> str:
         gid = ""
-        try:
-            gid = event.get_group_id()
-        except Exception:
-            gid = ""
-        if gid:
-            return f"group_{gid}"
-        return f"user_{event.get_sender_id()}"
+        try: gid = event.get_group_id()
+        except Exception: gid = ""
+        return f"group_{gid}" if gid else f"user_{event.get_sender_id()}"
 
     def _is_session_enabled(self, sid: str) -> bool:
-        if self.global_enable:
-            return sid not in self.disabled_sessions
-        return sid in self.enabled_sessions
+        return sid not in self.disabled_sessions if self.global_enable else sid in self.enabled_sessions
 
     def _normalize_text(self, text: str) -> str:
-        """移除不可见字符与BOM，避免破坏头部匹配。"""
-        if not text:
-            return text
-        invisibles = [
-            "\ufeff",  # BOM
-            "\u200b",
-            "\u200c",
-            "\u200d",
-            "\u200e",
-            "\u200f",  # ZW* & RTL/LTR marks
-            "\u202a",
-            "\u202b",
-            "\u202c",
-            "\u202d",
-            "\u202e",  # directional marks
-        ]
-        for ch in invisibles:
-            text = text.replace(ch, "")
+        if not text: return text
+        invisibles = ["\ufeff", "\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e"]
+        for ch in invisibles: text = text.replace(ch, "")
         return text
-
+    
     def _normalize_label(self, label: Optional[str]) -> Optional[str]:
-        """将任意英文/中文情绪词映射到四选一。
-        例：confused->neutral，upset->sad，furious->angry，delighted->happy 等。"""
-        if not label:
-            return None
+        if not label: return None
         lbl = label.strip().lower()
         mapping = {
-            "happy": {
-                "happy",
-                "joy",
-                "joyful",
-                "cheerful",
-                "delighted",
-                "excited",
-                "smile",
-                "positive",
-                "开心",
-                "快乐",
-                "高兴",
-                "喜悦",
-                "兴奋",
-                "愉快",
-            },
-            "sad": {
-                "sad",
-                "sorrow",
-                "sorrowful",
-                "depressed",
-                "down",
-                "unhappy",
-                "cry",
-                "crying",
-                "tearful",
-                "blue",
-                "upset",
-                "伤心",
-                "难过",
-                "沮丧",
-                "低落",
-                "悲伤",
-                "流泪",
-            },
-            "angry": {
-                "angry",
-                "mad",
-                "furious",
-                "annoyed",
-                "irritated",
-                "rage",
-                "rageful",
-                "wrath",
-                "生气",
-                "愤怒",
-                "恼火",
-                "气愤",
-            },
-            "neutral": {
-                "neutral",
-                "calm",
-                "plain",
-                "normal",
-                "objective",
-                "ok",
-                "fine",
-                "meh",
-                "average",
-                "confused",
-                "uncertain",
-                "unsure",
-                "平静",
-                "冷静",
-                "一般",
-                "中立",
-                "客观",
-                "困惑",
-                "迷茫",
-            },
+            "happy": {"happy", "joy", "joyful", "cheerful", "delighted", "excited", "smile", "positive", "开心", "快乐", "高兴", "喜悦", "兴奋", "愉快"},
+            "sad": {"sad", "sorrow", "sorrowful", "depressed", "down", "unhappy", "cry", "crying", "tearful", "blue", "upset", "伤心", "难过", "沮丧", "低落", "悲伤", "流泪"},
+            "angry": {"angry", "mad", "furious", "annoyed", "irritated", "rage", "rageful", "wrath", "生气", "愤怒", "恼火", "气愤"},
+            "neutral": {"neutral", "calm", "plain", "normal", "objective", "ok", "fine", "meh", "average", "confused", "uncertain", "unsure", "平静", "冷静", "一般", "中立", "客观", "困惑", "迷茫"},
         }
         for k, vs in mapping.items():
-            if lbl in vs:
-                return k
+            if lbl in vs: return k
         return None
 
     def _pick_voice_for_emotion(self, emotion: str):
-        """根据情绪选择音色：优先 exact -> neutral -> 偏好映射 -> 任意非空。
-        返回 (voice_key, voice_uri)；若无可用则 (None, None)。"""
         vm = self.voice_map or {}
-        # exact
-        v = vm.get(emotion)
-        if v:
-            return emotion, v
-        # neutral
-        v = vm.get("neutral")
-        if v:
-            return "neutral", v
-        # 偏好映射（让缺失的项落到最接近的可用音色）
+        if v := vm.get(emotion): return emotion, v
+        if v := vm.get("neutral"): return "neutral", v
         pref = {"sad": "angry", "angry": "angry", "happy": "happy", "neutral": "happy"}
         for key in [pref.get(emotion), "happy", "angry"]:
-            if key and vm.get(key):
-                return key, vm[key]
-        # 兜底：任意非空
+            if key and (v := vm.get(key)): return key, v
         for k, v in vm.items():
-            if v:
-                return k, v
+            if v: return k, v
         return None, None
 
-    def _strip_emo_head(self, text: str) -> tuple[str, Optional[str]]:
-        """从文本开头剥离各种 EMO/emo 标记变体，并返回(清理后的文本, 解析到的情绪或None)。"""
-        if not text:
-            return text, None
-        # 优先用宽松的头部匹配（限定四选一）
-        if self._emo_head_token_re:
-            m = self._emo_head_token_re.match(text)
-            if m:
-                label = (m.group("lbl") or m.group("lbl2") or "").lower()
-                if label not in EMOTIONS:
-                    label = None
-                cleaned = self._emo_head_token_re.sub("", text, count=1)
-                return cleaned.strip(), label
-        # 其次：捕获任意英文标签，再做同义词归一化
-        if self._emo_head_anylabel_re:
-            m2 = self._emo_head_anylabel_re.match(text)
-            if m2:
-                raw = (m2.group("raw") or "").lower()
-                label = self._normalize_label(raw)
-                cleaned = self._emo_head_anylabel_re.sub("", text, count=1)
-                return cleaned.strip(), label
-        # 最后：去掉任何形态头部标记（即便无法识别标签含义也移除）
-        if self._emo_marker_re_any and text.lstrip().startswith(("[", "【", "(")):
-            cleaned = self._emo_marker_re_any.sub("", text, count=1)
-            return cleaned.strip(), None
-        return text, None
-
     def _strip_emo_head_many(self, text: str) -> tuple[str, Optional[str]]:
-        """连续剥离多枚开头的EMO/emo标记（若LLM/其它插件重复注入）。返回(清理后文本, 最后一次解析到的情绪)。"""
         last_label: Optional[str] = None
         while True:
             cleaned, label = self._strip_emo_head(text)
-            if label:
-                last_label = label
-            if cleaned == text:
-                break
+            if label: last_label = label
+            if cleaned == text: break
             text = cleaned
         return text, last_label
 
-    # ---------------- LLM 请求前：注入情绪标记指令 -----------------
+    def _strip_emo_head(self, text: str) -> tuple[str, Optional[str]]:
+        if not text: return text, None
+        if self._emo_head_token_re:
+            if m := self._emo_head_token_re.match(text):
+                label = (m.group("lbl") or m.group("lbl2") or "").lower()
+                return self._emo_head_token_re.sub("", text, count=1).strip(), label if label in EMOTIONS else None
+        if self._emo_head_anylabel_re:
+            if m2 := self._emo_head_anylabel_re.match(text):
+                raw = (m2.group("raw") or "").lower()
+                return self._emo_head_anylabel_re.sub("", text, count=1).strip(), self._normalize_label(raw)
+        if self._emo_marker_re_any and text.lstrip().startswith(("[", "【", "(")):
+            return self._emo_marker_re_any.sub("", text, count=1).strip(), None
+        return text, None
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request):
-        """在系统提示中加入隐藏情绪标记指令，让 LLM 先输出 [EMO:xxx] 再回答。"""
-        if not self.emo_marker_enable:
-            # 简要调试：记录上下文条数与本轮 prompt 长度，便于排查“上下文丢失”
-            try:
-                ctxs = getattr(request, "contexts", None)
-                clen = len(ctxs) if isinstance(ctxs, list) else 0
-                plen = len(getattr(request, "prompt", "") or "")
-                logging.info(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
-            except Exception:
-                pass
-            return
+        if not self.emo_marker_enable: return
         try:
             tag = self.emo_marker_tag
-            instr = (
-                f"请在每次回复的最开头只输出一个隐藏情绪标记，格式严格为："
-                f"[{tag}:happy] 或 [{tag}:sad] 或 [{tag}:angry] 或 [{tag}:neutral]。"
-                "必须四选一；若无法判断请选择 neutral。该标记仅供系统解析，"
-                "输出后立刻继续正常作答，不要解释或复述该标记。"
-                "如你想到其它词，请映射到以上四类：happy(开心/喜悦/兴奋)、sad(伤心/难过/沮丧/upset)、"
-                "angry(生气/愤怒/恼火/furious)、neutral(平静/普通/困惑/confused)。"
-            )
-            # 避免重复注入：仅当当前 system_prompt/prompt 中没有我们的标签时注入
-            sp = getattr(request, "system_prompt", "") or ""
-            pp = getattr(request, "prompt", "") or ""
-            marker_present = (self.emo_marker_tag in sp) or (self.emo_marker_tag in pp)
-            if not marker_present:
-                # 以更高优先级前置到 system_prompt 顶部
-                try:
-                    request.system_prompt = (instr + "\n" + sp).strip()
-                except Exception:
-                    pass
-                # 同时在 prompt 顶部再前置一次，兼容部分来源只读取 prompt 的实现
-                try:
-                    request.prompt = (instr + "\n\n" + pp).strip()
-                except Exception:
-                    pass
-                # 尝试向 contexts 注入一条 system 消息（弱依赖，失败忽略）
-                try:
-                    ctxs = getattr(request, "contexts", None)
-                    if isinstance(ctxs, list):
-                        # 插到最前，提升优先级
-                        ctxs.insert(0, {"role": "system", "content": instr})
-                        request.contexts = ctxs
-                except Exception:
-                    pass
-            # 简要调试：记录上下文条数与本轮 prompt 长度，便于排查“上下文丢失”
-            try:
-                ctxs = getattr(request, "contexts", None)
-                clen = len(ctxs) if isinstance(ctxs, list) else 0
-                plen = len(getattr(request, "prompt", "") or "")
-                logging.info(f"TTSEmotionRouter.on_llm_request: injected={not marker_present}, contexts={clen}, prompt_len={plen}")
-            except Exception:
-                pass
-        except Exception:
-            pass
+            instr = (f"请在每次回复的最开头只输出一个隐藏情绪标记，格式严格为："
+                     f"[{tag}:happy] 或 [{tag}:sad] 或 [{tag}:angry] 或 [{tag}:neutral]。"
+                     "必须四选一；若无法判断请选择 neutral。该标记仅供系统解析，"
+                     "输出后立刻继续正常作答，不要解释或复述该标记。")
+            sp = getattr(request, 'system_prompt', '') or ''
+            pp = getattr(request, 'prompt', '') or ''
+            if tag not in sp and tag not in pp:
+                request.system_prompt = (instr + "\n" + sp).strip()
+                request.prompt = (instr + "\n\n" + pp).strip()
+                if isinstance(ctxs := getattr(request, 'contexts', None), list):
+                    ctxs.insert(0, {"role": "system", "content": instr})
+        except Exception: pass
 
-    # ---------------- LLM 标记解析（避免标签外显） -----------------
     @filter.on_llm_response(priority=1)
     async def on_llm_response(self, event: AstrMessageEvent, response: LLMResponse):
-        if not self.emo_marker_enable:
-            return
-        label: Optional[str] = None
-        cached_text: Optional[str] = None
-
-        # 1) 尝试从 completion_text 提取并清理
+        if not self.emo_marker_enable: return
+        label, cached_text = None, None
         try:
-            text = getattr(response, "completion_text", None)
-            if isinstance(text, str) and text.strip():
-                t0 = self._normalize_text(text)
-                cleaned, l1 = self._strip_emo_head_many(t0)
-                if l1 in EMOTIONS:
-                    label = l1
+            if isinstance(text := getattr(response, "completion_text", None), str) and text.strip():
+                cleaned, l1 = self._strip_emo_head_many(self._normalize_text(text))
+                if l1 in EMOTIONS: label = l1
                 response.completion_text = cleaned
-                cached_text = cleaned or cached_text
-        except Exception:
-            pass
-
-        # 2) 无论 completion_text 是否为空，都从 result_chain 首个 Plain 再尝试一次
+                cached_text = cleaned
+        except Exception: pass
         try:
-            rc = getattr(response, "result_chain", None)
-            if rc and hasattr(rc, "chain") and rc.chain:
-                new_chain = []
-                cleaned_once = False
+            if (rc := getattr(response, "result_chain", None)) and hasattr(rc, "chain") and rc.chain:
+                new_chain, cleaned_once = [], False
                 for comp in rc.chain:
-                    if (
-                        not cleaned_once
-                        and isinstance(comp, Plain)
-                        and getattr(comp, "text", None)
-                    ):
-                        t0 = self._normalize_text(comp.text)
-                        t, l2 = self._strip_emo_head_many(t0)
-                        if l2 in EMOTIONS and label is None:
-                            label = l2
+                    if not cleaned_once and isinstance(comp, Plain) and getattr(comp, "text", None):
+                        t, l2 = self._strip_emo_head_many(self._normalize_text(comp.text))
+                        if l2 in EMOTIONS and label is None: label = l2
                         if t:
                             new_chain.append(Plain(text=t))
-                            cached_text = t or cached_text
+                            if not cached_text: cached_text = t
                         cleaned_once = True
-                    else:
-                        new_chain.append(comp)
+                    else: new_chain.append(comp)
                 rc.chain = new_chain
-        except Exception:
-            pass
-
-        # 3) 记录到 session
+        except Exception: pass
         try:
             sid = self._sess_id(event)
             st = self._session_state.setdefault(sid, SessionState())
-            if label in EMOTIONS:
-                st.pending_emotion = label
-            # 缓存可读文本，供只剩下 Record 的兜底入库
-            if cached_text and cached_text.strip():
-                st.last_assistant_text = cached_text.strip()
-                st.last_assistant_text_time = time.time()
-        except Exception:
-            pass
+            if label in EMOTIONS: st.pending_emotion = label
+        except Exception: pass
 
-    # ---------------- Commands -----------------
     @filter.command("tts_marker_on", priority=1)
     async def tts_marker_on(self, event: AstrMessageEvent):
         self.emo_marker_enable = True
@@ -650,9 +333,6 @@ class TTSEmotionRouter(Star):
 
     @filter.command("tts_emote", priority=1)
     async def tts_emote(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        """
-        手动指定下一条消息的情绪用于路由：tts_emote happy|sad|angry|neutral
-        """
         try:
             label = (value or "").strip().lower()
             assert label in EMOTIONS
@@ -681,11 +361,9 @@ class TTSEmotionRouter(Star):
     async def tts_on(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
         if self.global_enable:
-            if sid in self.disabled_sessions:
-                self.disabled_sessions.remove(sid)
+            if sid in self.disabled_sessions: self.disabled_sessions.remove(sid)
         else:
-            if sid not in self.enabled_sessions:
-                self.enabled_sessions.append(sid)
+            if sid not in self.enabled_sessions: self.enabled_sessions.append(sid)
         self.config["enabled_sessions"] = self.enabled_sessions
         self.config["disabled_sessions"] = self.disabled_sessions
         self._save_config()
@@ -695,11 +373,9 @@ class TTSEmotionRouter(Star):
     async def tts_off(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
         if self.global_enable:
-            if sid not in self.disabled_sessions:
-                self.disabled_sessions.append(sid)
+            if sid not in self.disabled_sessions: self.disabled_sessions.append(sid)
         else:
-            if sid in self.enabled_sessions:
-                self.enabled_sessions.remove(sid)
+            if sid in self.enabled_sessions: self.enabled_sessions.remove(sid)
         self.config["enabled_sessions"] = self.enabled_sessions
         self.config["disabled_sessions"] = self.disabled_sessions
         self._save_config()
@@ -708,8 +384,6 @@ class TTSEmotionRouter(Star):
     @filter.command("tts_prob", priority=1)
     async def tts_prob(self, event: AstrMessageEvent, *, value: Optional[str] = None):
         try:
-            if value is None:
-                raise ValueError
             v = float(value)
             assert 0.0 <= v <= 1.0
             self.prob = v
@@ -722,8 +396,6 @@ class TTSEmotionRouter(Star):
     @filter.command("tts_limit", priority=1)
     async def tts_limit(self, event: AstrMessageEvent, *, value: Optional[str] = None):
         try:
-            if value is None:
-                raise ValueError
             v = int(value)
             assert v >= 0
             self.text_limit = v
@@ -734,12 +406,8 @@ class TTSEmotionRouter(Star):
             yield event.plain_result("用法：tts_limit <非负整数>")
 
     @filter.command("tts_cooldown", priority=1)
-    async def tts_cooldown(
-        self, event: AstrMessageEvent, *, value: Optional[str] = None
-    ):
+    async def tts_cooldown(self, event: AstrMessageEvent, *, value: Optional[str] = None):
         try:
-            if value is None:
-                raise ValueError
             v = int(value)
             assert v >= 0
             self.cooldown = v
@@ -748,21 +416,13 @@ class TTSEmotionRouter(Star):
             yield event.plain_result(f"TTS冷却时间已设为 {v}s")
         except Exception:
             yield event.plain_result("用法：tts_cooldown <非负整数(秒)>")
-
+    
     @filter.command("tts_gain", priority=1)
     async def tts_gain(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        """调节输出音量增益（单位dB，范围 -10 ~ 10）。示例：tts_gain 5"""
         try:
-            if value is None:
-                raise ValueError
             v = float(value)
             assert -10.0 <= v <= 10.0
-            # 更新运行期
-            try:
-                self.tts.gain = v
-            except Exception:
-                pass
-            # 持久化
+            self.tts.gain = v
             api_cfg = self.config.get("api", {}) or {}
             api_cfg["gain"] = v
             self.config["api"] = api_cfg
@@ -770,7 +430,7 @@ class TTSEmotionRouter(Star):
             yield event.plain_result(f"TTS音量增益已设为 {v} dB")
         except Exception:
             yield event.plain_result("用法：tts_gain <-10~10>，例：tts_gain 5")
-
+    
     @filter.command("tts_status", priority=1)
     async def tts_status(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
@@ -782,500 +442,149 @@ class TTSEmotionRouter(Star):
 
     @filter.command("tts_mixed_on", priority=1)
     async def tts_mixed_on(self, event: AstrMessageEvent):
-        """允许混合输出（文本+语音都保留）"""
         self.allow_mixed = True
-        try:
-            if self.config is not None and (
-                isinstance(self.config, AstrBotConfig) or isinstance(self.config, dict)
-            ):
-                self.config["allow_mixed"] = True
-                self._save_config()
-        except Exception:
-            pass
+        self.config["allow_mixed"] = True
+        self._save_config()
         yield event.plain_result("TTS混合输出：开启（文本+语音）")
 
     @filter.command("tts_mixed_off", priority=1)
     async def tts_mixed_off(self, event: AstrMessageEvent):
-        """仅纯文本可参与合成；含图片/回复等时跳过"""
         self.allow_mixed = False
-        try:
-            if self.config is not None and (
-                isinstance(self.config, AstrBotConfig) or isinstance(self.config, dict)
-            ):
-                self.config["allow_mixed"] = False
-                self._save_config()
-        except Exception:
-            pass
+        self.config["allow_mixed"] = False
+        self._save_config()
         yield event.plain_result("TTS混合输出：关闭（仅纯文本时尝试合成）")
-
-    # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
-    # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
+    
+    # ---------------- After send hook: (此钩子不再需要主动操作，保留为空或用于日志) -----------------
+    _after_message_sent_hook = None
     if hasattr(filter, "after_message_sent"):
         @filter.after_message_sent(priority=10000)
         async def after_message_sent(self, event: AstrMessageEvent):
-            # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
-            try:
-                # 确保不被判定为终止传播
-                try:
-                    event.continue_event()
-                except Exception:
-                    pass
-                result = event.get_result()
-                if not result or not getattr(result, "chain", None):
-                    return
-                try:
-                    has_plain = any(isinstance(c, Plain) for c in result.chain)
-                    has_record = any(isinstance(c, Record) for c in result.chain)
-                    logging.info(
-                        "after_message_sent: snapshot len=%d, has_plain=%s, has_record=%s, is_llm=%s",
-                        len(result.chain), has_plain, has_record, getattr(result, "result_content_type", None) == ResultContentType.LLM_RESULT,
-                    )
-                except Exception:
-                    pass
-                # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
-                try:
-                    if any(self._is_our_record(c) for c in result.chain):
-                        await self._ensure_history_saved(event)
-                except Exception:
-                    pass
-                # 再次声明继续传播
-                try:
-                    event.continue_event()
-                except Exception:
-                    pass
-                # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
-                try:
-                    _ = event.get_result()
-                except Exception:
-                    pass
-            except Exception:
-                pass
+            # 此处不再需要任何逻辑。让事件自然传播。
+            # 保留此钩子结构以兼容，但函数体为空。
+            pass
+        _after_message_sent_hook = after_message_sent
     elif hasattr(filter, "on_after_message_sent"):
         @filter.on_after_message_sent(priority=10000)
-        async def after_message_sent(self, event: AstrMessageEvent):
-            # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
-            try:
-                # 确保不被判定为终止传播
-                try:
-                    event.continue_event()
-                except Exception:
-                    pass
-                result = event.get_result()
-                if not result or not getattr(result, "chain", None):
-                    return
-                try:
-                    has_plain = any(isinstance(c, Plain) for c in result.chain)
-                    has_record = any(isinstance(c, Record) for c in result.chain)
-                    logging.info(
-                        "after_message_sent: snapshot len=%d, has_plain=%s, has_record=%s, is_llm=%s",
-                        len(result.chain), has_plain, has_record, getattr(result, "result_content_type", None) == ResultContentType.LLM_RESULT,
-                    )
-                except Exception:
-                    pass
-                # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
-                try:
-                    if any(self._is_our_record(c) for c in result.chain):
-                        await self._ensure_history_saved(event)
-                except Exception:
-                    pass
-                # 再次声明继续传播
-                try:
-                    event.continue_event()
-                except Exception:
-                    pass
-                # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
-                try:
-                    _ = event.get_result()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-    else:
-        async def after_message_sent(self, event: AstrMessageEvent):
-            return
+        async def on_after_message_sent(self, event: AstrMessageEvent):
+            pass
+        _after_message_sent_hook = on_after_message_sent
 
-    # ---------------- Core hook -----------------
+    # ---------------- 修正后的核心钩子 (REFACTORED CORE HOOK) -----------------
     @filter.on_decorating_result(priority=10000)
     async def on_decorating_result(self, event: AstrMessageEvent):
-        # 在入口处尽可能声明继续传播，避免被归因为终止传播
-        try:
-            event.continue_event()
-        except Exception:
-            pass
-        # 若进入本阶段已为 STOP，记录并主动切回 CONTINUE，避免被判定“终止传播”
-        try:
-            if event.is_stopped():
-                logging.info("TTSEmotionRouter.on_decorating_result: detected STOP at entry, forcing CONTINUE for decorating")
-                event.continue_event()
-        except Exception:
-            pass
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
-            logging.info("TTS skip: session disabled (%s)", sid)
-            try:
-                event.continue_event()
-            except Exception:
-                pass
             return
 
-        # 结果链
         result = event.get_result()
         if not result or not result.chain:
-            logging.debug("TTS skip: empty result chain")
-            try:
-                event.continue_event()
-            except Exception:
-                pass
             return
 
-    # 不再在此处清空单个 Record 的链，改为在后续统一移除“本插件生成的 Record”，以保留文本给历史保存。
+        # 检查是否包含非 Plain 元素 (如果禁止混合模式)
+        if not self.allow_mixed:
+            if any(not isinstance(c, Plain) for c in result.chain):
+                logging.info("TTS skip: mixed content not allowed")
+                return
 
-        # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
-        try:
-            # 先移除链中任何属于本插件的 Record，避免被后续阶段再次发送
-            if any(self._is_our_record(c) for c in result.chain):
-                result.chain = [c for c in result.chain if not self._is_our_record(c)]
-                logging.info("skip duplicate event: purged our TTS Record(s) from chain before finalize")
-                if not result.chain:
-                    # 不再调用 stop_event，避免影响后续阶段（如历史保存）
-                    try:
-                        event.continue_event()
-                    except Exception:
-                        pass
-                    return
-
-            new_chain = []
-            cleaned_once = False
-            for comp in result.chain:
-                if (
-                    not cleaned_once
-                    and isinstance(comp, Plain)
-                    and getattr(comp, "text", None)
-                ):
-                    t0 = comp.text
-                    t0 = self._normalize_text(t0)
-                    t, _ = self._strip_emo_head_many(t0)
-                    if t:
-                        new_chain.append(Plain(text=t))
-                    cleaned_once = True
-                else:
-                    new_chain.append(comp)
-            result.chain = new_chain
-        except Exception:
-            pass
-
-        # 是否允许混合
-        if not self.allow_mixed and any(not isinstance(c, Plain) for c in result.chain):
-            logging.info("TTS skip: mixed content not allowed (allow_mixed=%s)", self.allow_mixed)
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
-
-    # 拼接纯文本
-        text_parts = [
-            c.text.strip()
-            for c in result.chain
-            if isinstance(c, Plain) and c.text.strip()
-        ]
+        # 拼接纯文本用于TTS
+        text_parts = [c.text for c in result.chain if isinstance(c, Plain) and getattr(c, 'text', '')]
         if not text_parts:
-            logging.debug("TTS skip: no plain text parts after cleaning")
-            try:
-                event.continue_event()
-            except Exception:
-                pass
             return
-        text = " ".join(text_parts)
+        
+        full_text = " ".join(text_parts).strip()
+        cleaned_text, _ = self._strip_emo_head_many(self._normalize_text(full_text))
 
-        # 归一化 + 连续剥离（终极兜底）
-        orig_text = text
-        text = self._normalize_text(text)
-        text, _ = self._strip_emo_head_many(text)
-
-        # 过滤链接/文件等提示性内容，避免朗读
-        if re.search(
-            r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I
-        ):
-            logging.info("TTS skip: detected link/attachment tokens")
-            try:
-                event.continue_event()
-            except Exception:
-                pass
+        if not cleaned_text or re.search(r"(https?://|www\.|\[图片\]|\[文件\])", cleaned_text, re.I):
             return
 
-        # 事件级签名去重（应对流水线二次触发/并发触发）
-        try:
-            md5 = hashlib.md5(text.encode("utf-8")).hexdigest()
-            sig = f"{sid}|{md5}"
-        except Exception:
-            sig = f"{sid}|{len(text)}"
+        # --- 通过所有门控检查 ---
         now = time.time()
-        # 清理过期项（懒清理）
-        try:
-            if len(self._recent_sends) > 1024:
-                cutoff = now - 60.0
-                self._recent_sends = {k: t for k, t in self._recent_sends.items() if t >= cutoff}
-        except Exception:
-            pass
-        # 并发中的同签名，直接阻断
-        if sig in self._inflight_sigs:
-            logging.info("skip duplicate event: inflight sig=%s", sig)
-            # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
-        # 短时间内重复同签名，直接阻断
-        last = self._recent_sends.get(sig)
-        if last and (now - last) < 8.0:
-            logging.info("skip duplicate event: recent sig=%s, dt=%.2fs", sig, now - last)
-            # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
-
-        # 随机/冷却/长度
         st = self._session_state.setdefault(sid, SessionState())
-        now = time.time()
-        if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
-            logging.info("TTS skip: cooldown active (%.2fs < %ss)", now - st.last_ts, self.cooldown)
-            try:
-                event.continue_event()
-            except Exception:
-                pass
+        
+        content_hash = hashlib.md5(cleaned_text.encode("utf-8")).hexdigest()
+        if content_hash in self._inflight_sigs:
+            logging.warning("TTS skip: duplicate request already in flight.")
             return
-
-        # 长度限制
-        if self.text_limit > 0 and len(text) > self.text_limit:
-            logging.info("TTS skip: over text_limit (len=%d > limit=%d)", len(text), self.text_limit)
-            try:
-                event.continue_event()
-            except Exception:
-                pass
+        if st.last_tts_content_hash == content_hash and (now - st.last_tts_time) < 8.0:
+            logging.info("TTS skip: duplicate content within 8s.")
             return
-
-        # 随机概率
+            
+        if 0 < self.cooldown < now - st.last_ts:
+            logging.info("TTS skip: cooldown.")
+            return
+        if 0 < self.text_limit < len(cleaned_text):
+            logging.info("TTS skip: text limit exceeded.")
+            return
         if random.random() > self.prob:
-            logging.info("TTS skip: probability gate (prob=%.2f)", self.prob)
-            try:
-                event.continue_event()
-            except Exception:
-                pass
+            logging.info("TTS skip: probability gate.")
             return
 
-        # 情绪选择：优先使用隐藏标记 -> 启发式
-        if st.pending_emotion in EMOTIONS:
-            emotion = st.pending_emotion
-            st.pending_emotion = None
-            src = "tag"
-        else:
-            emotion = self.heuristic_cls.classify(text, context=None)
-            src = "heuristic"
-            # 中性偏置：若文本无明显情绪关键词，则强制使用 neutral
-            try:
-                kw = getattr(self, "_emo_kw", {})
-                has_kw = any(p.search(text) for p in kw.values())
-                if not has_kw:
-                    emotion = "neutral"
-            except Exception:
-                pass
-
+        # --- 情绪和音色选择 ---
+        emotion = st.pending_emotion if st.pending_emotion in EMOTIONS else self.heuristic_cls.classify(cleaned_text)
+        st.pending_emotion = None
+        
         vkey, voice = self._pick_voice_for_emotion(emotion)
         if not voice:
-            logging.warning("No voice mapped for emotion=%s", emotion)
-            try:
-                event.continue_event()
-            except Exception:
-                pass
+            logging.warning(f"No voice found for emotion '{emotion}', skipping TTS.")
             return
 
-        # 依据情绪选择语速（未配置则为 None -> 使用默认）
-        speed_override = None
-        try:
-            if isinstance(self.speed_map, dict):
-                v = self.speed_map.get(emotion)
-                if v is None:
-                    v = self.speed_map.get("neutral")
-                if v is not None:
-                    speed_override = float(v)
-        except Exception:
-            speed_override = None
+        speed_override = self.speed_map.get(emotion, self.speed_map.get("neutral"))
 
-        logging.info(
-            "TTS route: emotion=%s(src=%s) -> %s (%s), speed=%s",
-            emotion,
-            src,
-            vkey,
-            (voice[:40] + "...")
-            if isinstance(voice, str) and len(voice) > 43
-            else voice,
-            speed_override
-            if speed_override is not None
-            else getattr(self.tts, "speed", None),
-        )
-        logging.debug(
-            "TTS input head(before/after): %r -> %r", orig_text[:60], text[:60]
-        )
-
-        out_dir = TEMP_DIR / sid
-        ensure_dir(out_dir)
-        
-        # TTS内容去重：检查相同文本的重复生成（8秒内）
-        now = time.time()
-        if (st.last_tts_content == text and 
-            (now - st.last_tts_time) < 8.0):
-            logging.info(f"TTS: 跳过重复内容，间隔={now - st.last_tts_time:.2f}s, text={text[:30]}...")
-            return
-        
-        # 最后一重防线：若 TTS 前文本仍以 emo/token 开头，强制清理
+        self._inflight_sigs.add(content_hash)
         try:
-            if text and (
-                text.lower().lstrip().startswith("emo")
-                or text.lstrip().startswith(("[", "【", "("))
-            ):
-                text, _ = self._strip_emo_head_many(text)
-        except Exception:
-            pass
-    # 进入并发保护区
-        self._inflight_sigs.add(sig)
-        try:
-            audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
+            logging.info(f"TTS route: emotion={emotion} -> voice={vkey}, speed={speed_override}")
+            out_dir = TEMP_DIR / sid
+            ensure_dir(out_dir)
+            
+            audio_path = await self.tts.synth(cleaned_text, voice, out_dir, speed=speed_override)
             if not audio_path:
-                logging.error("TTS调用失败，降级为文本")
-                return
+                raise ValueError("TTS synthesis failed, returned no path.")
 
-            # 更新去重状态
-            st.last_tts_content = text
+            # --- 核心逻辑修正 ---
+            # 1. 更新状态
+            st.last_ts = now
             st.last_tts_time = now
-            st.last_ts = time.time()
-            self._recent_sends[sig] = time.time()
+            st.last_tts_content_hash = content_hash
+            
+            # 2. 创建语音组件
+            record_component = Record(file=str(audio_path))
 
-            logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            # 先尝试直接入库历史；若失败，则保留 Plain+Record 交给下游入库
-            history_ok = False
-            try:
-                history_ok = await self._append_assistant_text_to_history(event, text) or False
-            except Exception:
-                history_ok = False
-            # 根据入库结果决定链形态
-            if history_ok:
-                # 已自行入库，按约定仅保留语音，避免重复发送
-                result.chain = [Record(file=str(audio_path))]
+            # 3. 根据 allow_mixed 策略修改消息链
+            #    关键：保留 Plain 组件，让 AstrBot 核心去保存上下文！
+            if self.allow_mixed:
+                # 混合模式：在末尾追加语音
+                result.chain.append(record_component)
             else:
-                # 历史未能直接写入，保留文本以便下游写入到上下文
-                result.chain = [Plain(text=text), Record(file=str(audio_path))]
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            # 缓存本轮可读文本
-            try:
-                st.last_assistant_text = text.strip()
-                st.last_assistant_text_time = time.time()
-            except Exception:
-                pass
-            try:
-                # 显式标记为 LLM 结果，便于其他插件在 after_message_sent 里入库
-                result.set_result_content_type(ResultContentType.LLM_RESULT)
-            except Exception:
-                pass
-            # 明确声明不终止事件传播，避免被判定为 STOP 而绕过上下文入库路径
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            # 不再调用 stop_event，避免打断 LLMRequestSubStage 的历史写入；
-            # RespondStage 会负责发送并在末尾 clear_result。
-            return
+                # 非混合模式：用语音替换所有文本
+                # 为了保证上下文，我们仍然保留原始的Plain组件，但在发送前通过另一个钩子移除
+                # 一个更简单的策略是，非混合模式下，文本和语音都发。这保证了功能性。
+                # 如果必须实现“只发语音”，那将需要更复杂的钩子操作。
+                # 目前最健壮的做法是：总是附加，让用户决定是否需要文本。
+                # 或者，我们在此阶段就替换，并接受上下文丢失的后果。
+                # 为了修复核心问题，我们选择总是保留文本。
+                
+                # 新策略：如果禁止混合，我们用一个包含原始文本和新语音的新链替换
+                # 这样，上下文得以保存，但用户会同时看到文本和语音。
+                # 这是在当前框架下，保证功能完整的唯一健壮方法。
+                new_chain: List[BaseMessageComponent] = []
+                for component in result.chain:
+                    if isinstance(component, Plain):
+                        new_chain.append(component)
+                new_chain.append(record_component)
+                result.chain = new_chain
+
+
+            logging.info(f"TTS success. Chain updated. Path: {audio_path.name}")
+            # 4. **不终止事件**。让 AstrBot 继续处理，它会发送消息并保存上下文。
+
+        except Exception as e:
+            logging.error(f"TTS synthesis process failed: {e}", exc_info=True)
+            # 失败时，不修改 result.chain，直接发送原文
         finally:
-            # 退出前再次声明继续传播，防止被判定为 STOP
+            self._inflight_sigs.discard(content_hash)
+            # **确保事件继续传播**
             try:
-                event.continue_event()
+                if event.is_stopped():
+                    event.continue_event()
             except Exception:
                 pass
-            self._inflight_sigs.discard(sig)
-
-    async def _ensure_history_saved(self, event: AstrMessageEvent) -> None:
-        """兜底：保证本轮助手可读文本写入到会话历史。
-        条件：当前结果被标记为 LLM_RESULT，且链中含有本插件生成的 Record。
-        逻辑：聚合链中的 Plain 文本；若历史最后的 assistant 文本不等于该文本，则补记一条。
-        """
-        try:
-            result = event.get_result()
-            if not result or not getattr(result, "chain", None):
-                return
-            # 兼容不同 AstrBot 版本：如果未被标记为 LLM_RESULT，则只要链中包含本插件生成的语音也应补写历史
-            if not result.is_llm_result() and not any(self._is_our_record(c) for c in result.chain):
-                return
-            # 聚合文本
-            parts = []
-            for comp in result.chain:
-                if isinstance(comp, Plain) and getattr(comp, "text", None):
-                    t = comp.text.strip()
-                    if t:
-                        parts.append(t)
-            text = "\n".join(parts).strip()
-            if not text:
-                # 若链中没有文本，回退使用缓存
-                try:
-                    sid = self._sess_id(event)
-                    st = self._session_state.setdefault(sid, SessionState())
-                    if st.last_assistant_text and (time.time() - st.last_assistant_text_time) < 60:
-                        await self._append_assistant_text_to_history(event, st.last_assistant_text)
-                except Exception:
-                    pass
-                return
-            await self._append_assistant_text_to_history(event, text)
-        except Exception:
-            # 容错：不因兜底写入失败影响主流程
-            pass
-
-    async def _append_assistant_text_to_history(self, event: AstrMessageEvent, text: str) -> bool:
-        """使用已清洗的最终文本，直接写入会话历史（去重且幂等）。返回是否成功写入。"""
-        if not text:
-            return False
-        try:
-            cm = self.context.conversation_manager
-            uid = event.unified_msg_origin
-            # 优先从 provider_request 中拿到当前请求的对话ID，避免误创建新会话
-            cid = None
-            try:
-                req = getattr(event, "get_extra", None) and event.get_extra("provider_request")
-                if req and getattr(req, "conversation", None) and getattr(req.conversation, "cid", None):
-                    cid = req.conversation.cid
-            except Exception:
-                cid = None
-            if not cid:
-                cid = await cm.get_curr_conversation_id(uid)
-            # 若仍无法确定当前对话，放弃写入，避免误创建新会话导致上下文割裂
-            if not cid:
-                logging.info("TTSEmotionRouter.history_fallback: skip write, no active conversation id")
-                return False
-            # 仅当对话确实存在时才写入，避免 get_conversation 的 create_if_not_exists 分配新ID
-            conv = await cm.get_conversation(uid, cid, create_if_not_exists=False)
-            if not conv:
-                logging.info("TTSEmotionRouter.history_fallback: skip write, conversation not found for cid=%s", cid)
-                return False
-            import json as _json
-            msgs = []
-            try:
-                msgs = _json.loads(conv.history) if getattr(conv, "history", "") else []
-            except Exception:
-                msgs = []
-
-            # 若最后一个 assistant 文本已相同，则不重复写入
-            if msgs:
-                last = msgs[-1]
-                if isinstance(last, dict) and last.get("role") == "assistant" and (last.get("content") or "").strip() == text.strip():
-                    return True
-
-            msgs.append({"role": "assistant", "content": text.strip()})
-            await cm.update_conversation(uid, cid, history=msgs)
-            logging.info("TTSEmotionRouter.history_fallback: appended assistant text to conversation history")
-            return True
-        except Exception:
-            return False
