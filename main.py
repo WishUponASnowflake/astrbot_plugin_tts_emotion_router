@@ -165,17 +165,17 @@ class TTSEmotionRouter(Star):
             tag = re.escape(self.emo_marker_tag)
             # 允许“:[label]”可缺省label，接受半/全角冒号及连字符，锚定开头以仅清理头部
             self._emo_marker_re_any = re.compile(
-                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*(?:[:：-]\s*[a-z]*)?\s*[\]\)】]",
+                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*(?:[:\uff1a-]\s*[a-z]*)?\s*[\]\)】]",
                 re.I,
             )
             # 头部 token：支持 [EMO] / [EMO:] / 【EMO：】 / emo / emo:happy / 等，label 可缺省（限定四选一）
             self._emo_head_token_re = re.compile(
-                rf"^[\s\ufeff]*(?:[\[\(【]\s*{tag}\s*(?:[:：-]\s*(?P<lbl>happy|sad|angry|neutral))?\s*[\]\)】]|(?:{tag}|emo)\s*(?:[:：-]\s*(?P<lbl2>happy|sad|angry|neutral))?)\s*[,，。:：-]*\s*",
+                rf"^[\s\ufeff]*(?:[\[\(【]\s*{tag}\s*(?:[:\uff1a-]\s*(?P<lbl>happy|sad|angry|neutral))?\s*[\]\)】]|(?:{tag}|emo)\s*(?:[:\uff1a-]\s*(?P<lbl2>happy|sad|angry|neutral))?)\s*[,，。:\uff1a-]*\s*",
                 re.I,
             )
             # 头部 token（英文任意标签）：如 [EMO:confused]，先取 raw 再做同义词归一化
             self._emo_head_anylabel_re = re.compile(
-                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*[:：-]\s*(?P<raw>[a-z]+)\s*[\]\)】]",
+                rf"^[\s\ufeff]*[\[\(【]\s*{tag}\s*[:\uff1a-]\s*(?P<raw>[a-z]+)\s*[\]\)】]",
                 re.I,
             )
         except Exception:
@@ -406,7 +406,7 @@ class TTSEmotionRouter(Star):
                 label = self._normalize_label(raw)
                 cleaned = self._emo_head_anylabel_re.sub("", text, count=1)
                 return cleaned.strip(), label
-        # 最后：去掉任何形态头部标签（即便无法识别标签含义也移除）
+        # 最后：去掉任何形态头部标记（即便无法识别标签含义也移除）
         if self._emo_marker_re_any and text.lstrip().startswith(("[", "【", "(")):
             cleaned = self._emo_marker_re_any.sub("", text, count=1)
             return cleaned.strip(), None
@@ -519,7 +519,9 @@ class TTSEmotionRouter(Star):
 
     @filter.command("tts_emote", priority=1)
     async def tts_emote(self, event: AstrMessageEvent, *, value: Optional[str] = None):
-        """手动指定下一条消息的情绪用于路由：tts_emote happy|sad|angry|neutral"""
+        """
+        手动指定下一条消息的情绪用于路由：tts_emote happy|sad|angry|neutral
+        """
         try:
             label = (value or "").strip().lower()
             assert label in EMOTIONS
@@ -658,6 +660,21 @@ class TTSEmotionRouter(Star):
         result = event.get_result()
         if not result or not result.chain:
             return
+
+        # 防线0：若结果链已经是本插件生成的单个 Record（通常意味着前一次已完成），直接终止传播以避免重复发送
+        try:
+            if len(result.chain) == 1 and isinstance(result.chain[0], Record):
+                rec = result.chain[0]
+                f = getattr(rec, "file", "") or ""
+                if f:
+                    fpath = Path(f)
+                    # 仅当文件位于本插件 temp 目录下时判定为本插件产物
+                    if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
+                        logging.info("skip duplicate event: detected existing Record from TTS, stop propagation")
+                        event.stop_event()
+                        return
+        except Exception:
+            pass
 
         # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
         try:
