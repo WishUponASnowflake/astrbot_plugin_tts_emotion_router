@@ -214,6 +214,18 @@ class TTSEmotionRouter(Star):
                 "angry": re.compile(r"angry|furious|mad|rage", re.I),
             }
 
+    def _is_our_record(self, comp) -> bool:
+        try:
+            if not isinstance(comp, Record):
+                return False
+            f = getattr(comp, "file", "") or ""
+            if not f:
+                return False
+            fpath = Path(f)
+            return str(fpath).startswith(str((Path(__file__).parent / "temp").resolve()))
+        except Exception:
+            return False
+
     # ---------------- Config helpers -----------------
     def _load_config(self, cfg: dict) -> dict:
         # 合并磁盘config与传入config，便于热更
@@ -655,7 +667,7 @@ class TTSEmotionRouter(Star):
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
     # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
     if hasattr(filter, "after_message_sent"):
-        @filter.after_message_sent(priority=-10000)
+        @filter.after_message_sent(priority=10000)
         async def after_message_sent(self, event: AstrMessageEvent):
             try:
                 result = event.get_result()
@@ -676,7 +688,7 @@ class TTSEmotionRouter(Star):
             except Exception:
                 pass
     elif hasattr(filter, "on_after_message_sent"):
-        @filter.on_after_message_sent(priority=-10000)
+        @filter.on_after_message_sent(priority=10000)
         async def after_message_sent(self, event: AstrMessageEvent):
             try:
                 result = event.get_result()
@@ -701,7 +713,7 @@ class TTSEmotionRouter(Star):
             return
 
     # ---------------- Core hook -----------------
-    @filter.on_decorating_result(priority=-10000)
+    @filter.on_decorating_result(priority=10000)
     async def on_decorating_result(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
@@ -735,6 +747,14 @@ class TTSEmotionRouter(Star):
 
         # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
         try:
+            # 先移除链中任何属于本插件的 Record，避免被后续阶段再次发送
+            if any(self._is_our_record(c) for c in result.chain):
+                result.chain = [c for c in result.chain if not self._is_our_record(c)]
+                logging.info("skip duplicate event: purged our TTS Record(s) from chain before finalize")
+                if not result.chain:
+                    event.stop_event()
+                    return
+
             new_chain = []
             cleaned_once = False
             for comp in result.chain:
