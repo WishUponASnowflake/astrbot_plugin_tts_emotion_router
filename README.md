@@ -45,7 +45,7 @@
 - 发送短句测试不同情绪，验证音色/语速切换。
 
 ## 硅基流动一键上传音色工具
-不会上传硅基cosyvoice音色？直接到 [Releases](https://github.com/你的用户名/你的仓库/releases) 页面下载 exe 附件，双击即可用！
+不会上传硅基cosyvoice音色？直接到 [Releases](https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router/releases/tag/v0.1.1) 页面下载 exe 附件，双击即可用！
 需要准备的东西：5Mb以下的10s左右的清晰干净的人声素材，音频所对应的文本，一个硅基流动apikey（音色绑定apikey，建议单独开一个apikey）
 
 ## 指令速查
