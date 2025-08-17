@@ -73,6 +73,8 @@ class SessionState:
     pending_emotion: Optional[str] = None  # 基于隐藏标记的待用情绪
     last_tts_content: Optional[str] = None  # 最后生成的TTS内容（防重复）
     last_tts_time: float = 0.0  # 最后TTS生成时间
+    last_assistant_text: Optional[str] = None  # 最近一次助手可读文本（用于兜底入库）
+    last_assistant_text_time: float = 0.0
 
 
 @register(
@@ -482,6 +484,7 @@ class TTSEmotionRouter(Star):
         if not self.emo_marker_enable:
             return
         label: Optional[str] = None
+        cached_text: Optional[str] = None
 
         # 1) 尝试从 completion_text 提取并清理
         try:
@@ -492,6 +495,7 @@ class TTSEmotionRouter(Star):
                 if l1 in EMOTIONS:
                     label = l1
                 response.completion_text = cleaned
+                cached_text = cleaned or cached_text
         except Exception:
             pass
 
@@ -513,6 +517,7 @@ class TTSEmotionRouter(Star):
                             label = l2
                         if t:
                             new_chain.append(Plain(text=t))
+                            cached_text = t or cached_text
                         cleaned_once = True
                     else:
                         new_chain.append(comp)
@@ -521,10 +526,17 @@ class TTSEmotionRouter(Star):
             pass
 
         # 3) 记录到 session
-        if label in EMOTIONS:
+        try:
             sid = self._sess_id(event)
             st = self._session_state.setdefault(sid, SessionState())
-            st.pending_emotion = label
+            if label in EMOTIONS:
+                st.pending_emotion = label
+            # 缓存可读文本，供只剩下 Record 的兜底入库
+            if cached_text and cached_text.strip():
+                st.last_assistant_text = cached_text.strip()
+                st.last_assistant_text_time = time.time()
+        except Exception:
+            pass
 
     # ---------------- Commands -----------------
     @filter.command("tts_marker_on", priority=1)
@@ -716,6 +728,11 @@ class TTSEmotionRouter(Star):
         async def after_message_sent(self, event: AstrMessageEvent):
             # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
+                # 确保不被判定为终止传播
+                try:
+                    event.continue_event()
+                except Exception:
+                    pass
                 result = event.get_result()
                 if not result or not getattr(result, "chain", None):
                     return
@@ -730,8 +747,13 @@ class TTSEmotionRouter(Star):
                     pass
                 # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
                 try:
-                    if result.is_llm_result() and any(self._is_our_record(c) for c in result.chain):
+                    if any(self._is_our_record(c) for c in result.chain):
                         await self._ensure_history_saved(event)
+                except Exception:
+                    pass
+                # 再次声明继续传播
+                try:
+                    event.continue_event()
                 except Exception:
                     pass
             except Exception:
@@ -741,6 +763,11 @@ class TTSEmotionRouter(Star):
         async def after_message_sent(self, event: AstrMessageEvent):
             # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
+                # 确保不被判定为终止传播
+                try:
+                    event.continue_event()
+                except Exception:
+                    pass
                 result = event.get_result()
                 if not result or not getattr(result, "chain", None):
                     return
@@ -755,8 +782,13 @@ class TTSEmotionRouter(Star):
                     pass
                 # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
                 try:
-                    if result.is_llm_result() and any(self._is_our_record(c) for c in result.chain):
+                    if any(self._is_our_record(c) for c in result.chain):
                         await self._ensure_history_saved(event)
+                except Exception:
+                    pass
+                # 再次声明继续传播
+                try:
+                    event.continue_event()
                 except Exception:
                     pass
             except Exception:
@@ -768,6 +800,11 @@ class TTSEmotionRouter(Star):
     # ---------------- Core hook -----------------
     @filter.on_decorating_result(priority=10000)
     async def on_decorating_result(self, event: AstrMessageEvent):
+        # 在入口处尽可能声明继续传播，避免被归因为终止传播
+        try:
+            event.continue_event()
+        except Exception:
+            pass
         # 若进入本阶段已为 STOP，记录并主动切回 CONTINUE，避免被判定“终止传播”
         try:
             if event.is_stopped():
@@ -823,7 +860,7 @@ class TTSEmotionRouter(Star):
             logging.info("TTS skip: mixed content not allowed (allow_mixed=%s)", self.allow_mixed)
             return
 
-        # 拼接纯文本
+    # 拼接纯文本
         text_parts = [
             c.text.strip()
             for c in result.chain
@@ -958,7 +995,7 @@ class TTSEmotionRouter(Star):
                 text, _ = self._strip_emo_head_many(text)
         except Exception:
             pass
-        # 进入并发保护区
+    # 进入并发保护区
         self._inflight_sigs.add(sig)
         try:
             audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
@@ -975,6 +1012,12 @@ class TTSEmotionRouter(Star):
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
             # 保留文本和语音，保证上下游插件和上下文不丢失
             result.chain = [Plain(text=text), Record(file=str(audio_path))]
+            # 缓存本轮可读文本
+            try:
+                st.last_assistant_text = text.strip()
+                st.last_assistant_text_time = time.time()
+            except Exception:
+                pass
             try:
                 # 显式标记为 LLM 结果，便于其他插件在 after_message_sent 里入库
                 result.set_result_content_type(ResultContentType.LLM_RESULT)
@@ -994,6 +1037,11 @@ class TTSEmotionRouter(Star):
             # RespondStage 会负责发送并在末尾 clear_result。
             return
         finally:
+            # 退出前再次声明继续传播，防止被判定为 STOP
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             self._inflight_sigs.discard(sig)
 
     async def _ensure_history_saved(self, event: AstrMessageEvent) -> None:
@@ -1017,6 +1065,14 @@ class TTSEmotionRouter(Star):
                         parts.append(t)
             text = "\n".join(parts).strip()
             if not text:
+                # 若链中没有文本，回退使用缓存
+                try:
+                    sid = self._sess_id(event)
+                    st = self._session_state.setdefault(sid, SessionState())
+                    if st.last_assistant_text and (time.time() - st.last_assistant_text_time) < 60:
+                        await self._append_assistant_text_to_history(event, st.last_assistant_text)
+                except Exception:
+                    pass
                 return
             await self._append_assistant_text_to_history(event, text)
         except Exception:
@@ -1030,10 +1086,25 @@ class TTSEmotionRouter(Star):
         try:
             cm = self.context.conversation_manager
             uid = event.unified_msg_origin
-            cid = await cm.get_curr_conversation_id(uid)
+            # 优先从 provider_request 中拿到当前请求的对话ID，避免误创建新会话
+            cid = None
+            try:
+                req = getattr(event, "get_extra", None) and event.get_extra("provider_request")
+                if req and getattr(req, "conversation", None) and getattr(req.conversation, "cid", None):
+                    cid = req.conversation.cid
+            except Exception:
+                cid = None
             if not cid:
-                cid = await cm.new_conversation(uid)
-            conv = await cm.get_conversation(uid, cid, create_if_not_exists=True)
+                cid = await cm.get_curr_conversation_id(uid)
+            # 若仍无法确定当前对话，放弃写入，避免误创建新会话导致上下文割裂
+            if not cid:
+                logging.info("TTSEmotionRouter.history_fallback: skip write, no active conversation id")
+                return
+            # 仅当对话确实存在时才写入，避免 get_conversation 的 create_if_not_exists 分配新ID
+            conv = await cm.get_conversation(uid, cid, create_if_not_exists=False)
+            if not conv:
+                logging.info("TTSEmotionRouter.history_fallback: skip write, conversation not found for cid=%s", cid)
+                return
             import json as _json
             msgs = []
             try:
