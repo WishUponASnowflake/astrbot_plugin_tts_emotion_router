@@ -49,6 +49,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Record, Plain
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.api.provider import LLMResponse
+from astrbot.core.message.message_event_result import ResultContentType
 
 from .emotion.infer import EMOTIONS
 from .emotion.classifier import HeuristicClassifier  # LLMClassifier 不再使用
@@ -713,47 +714,43 @@ class TTSEmotionRouter(Star):
     if hasattr(filter, "after_message_sent"):
         @filter.after_message_sent(priority=10000)
         async def after_message_sent(self, event: AstrMessageEvent):
+            # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
                 result = event.get_result()
                 if not result or not getattr(result, "chain", None):
                     return
-                if len(result.chain) == 1 and isinstance(result.chain[0], Record):
-                    rec = result.chain[0]
-                    f = getattr(rec, "file", "") or ""
-                    if f:
-                        fpath = Path(f)
-                        if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
-                            # 该条消息我们已发送完成，清空链以阻止后续 RespondStage 重复发送
-                            result.chain = []
-                            logging.info(
-                                "after_message_sent: cleared chain to prevent duplicate resend for %s",
-                                fpath.name,
-                            )
+                try:
+                    has_plain = any(isinstance(c, Plain) for c in result.chain)
+                    has_record = any(isinstance(c, Record) for c in result.chain)
+                    logging.info(
+                        "after_message_sent: snapshot len=%d, has_plain=%s, has_record=%s, is_llm=%s",
+                        len(result.chain), has_plain, has_record, getattr(result, "result_content_type", None) == ResultContentType.LLM_RESULT,
+                    )
+                except Exception:
+                    pass
             except Exception:
                 pass
     elif hasattr(filter, "on_after_message_sent"):
         @filter.on_after_message_sent(priority=10000)
         async def after_message_sent(self, event: AstrMessageEvent):
+            # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
                 result = event.get_result()
                 if not result or not getattr(result, "chain", None):
                     return
-                if len(result.chain) == 1 and isinstance(result.chain[0], Record):
-                    rec = result.chain[0]
-                    f = getattr(rec, "file", "") or ""
-                    if f:
-                        fpath = Path(f)
-                        if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
-                            result.chain = []
-                            logging.info(
-                                "after_message_sent: cleared chain to prevent duplicate resend for %s",
-                                fpath.name,
-                            )
+                try:
+                    has_plain = any(isinstance(c, Plain) for c in result.chain)
+                    has_record = any(isinstance(c, Record) for c in result.chain)
+                    logging.info(
+                        "after_message_sent: snapshot len=%d, has_plain=%s, has_record=%s, is_llm=%s",
+                        len(result.chain), has_plain, has_record, getattr(result, "result_content_type", None) == ResultContentType.LLM_RESULT,
+                    )
+                except Exception:
+                    pass
             except Exception:
                 pass
     else:
         async def after_message_sent(self, event: AstrMessageEvent):
-            # 当前 AstrBot 版本不支持 after_message_sent 钩子，忽略。
             return
 
     # ---------------- Core hook -----------------
@@ -777,26 +774,7 @@ class TTSEmotionRouter(Star):
             logging.debug("TTS skip: empty result chain")
             return
 
-        # 防线0：若结果链已经是本插件生成的单个 Record（通常意味着前一次 Respond 已发送），
-        # 直接清空链并终止传播，避免 RespondStage 在本次/后续轮次再次发送。
-        try:
-            if len(result.chain) == 1 and isinstance(result.chain[0], Record):
-                rec = result.chain[0]
-                f = getattr(rec, "file", "") or ""
-                if f:
-                    fpath = Path(f)
-                    # 仅当文件位于本插件 temp 目录下时判定为本插件产物
-                    if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
-                        # 清空，确保 RespondStage 不会再次发送该 Record
-                        result.chain = []
-                        logging.info(
-                            "skip duplicate event: cleared existing TTS Record(%s) to prevent re-send",
-                            fpath.name,
-                        )
-                        # 不再调用 stop_event，避免打断上游 LLM 阶段的历史保存
-                        return
-        except Exception:
-            pass
+    # 不再在此处清空单个 Record 的链，改为在后续统一移除“本插件生成的 Record”，以保留文本给历史保存。
 
         # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
         try:
@@ -985,6 +963,11 @@ class TTSEmotionRouter(Star):
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
             # 保留文本和语音，保证上下游插件和上下文不丢失
             result.chain = [Plain(text=text), Record(file=str(audio_path))]
+            try:
+                # 显式标记为 LLM 结果，便于其他插件在 after_message_sent 里入库
+                result.set_result_content_type(ResultContentType.LLM_RESULT)
+            except Exception:
+                pass
             # 不再调用 stop_event，避免打断 LLMRequestSubStage 的历史写入；
             # RespondStage 会负责发送并在末尾 clear_result。
             return
