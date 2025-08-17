@@ -728,6 +728,12 @@ class TTSEmotionRouter(Star):
                     )
                 except Exception:
                     pass
+                # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
+                try:
+                    if result.is_llm_result() and any(self._is_our_record(c) for c in result.chain):
+                        await self._ensure_history_saved(event)
+                except Exception:
+                    pass
             except Exception:
                 pass
     elif hasattr(filter, "on_after_message_sent"):
@@ -745,6 +751,12 @@ class TTSEmotionRouter(Star):
                         "after_message_sent: snapshot len=%d, has_plain=%s, has_record=%s, is_llm=%s",
                         len(result.chain), has_plain, has_record, getattr(result, "result_content_type", None) == ResultContentType.LLM_RESULT,
                     )
+                except Exception:
+                    pass
+                # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
+                try:
+                    if result.is_llm_result() and any(self._is_our_record(c) for c in result.chain):
+                        await self._ensure_history_saved(event)
                 except Exception:
                     pass
             except Exception:
@@ -973,3 +985,54 @@ class TTSEmotionRouter(Star):
             return
         finally:
             self._inflight_sigs.discard(sig)
+
+    async def _ensure_history_saved(self, event: AstrMessageEvent) -> None:
+        """兜底：保证本轮助手可读文本写入到会话历史。
+        条件：当前结果被标记为 LLM_RESULT，且链中含有本插件生成的 Record。
+        逻辑：聚合链中的 Plain 文本；若历史最后的 assistant 文本不等于该文本，则补记一条。
+        """
+        try:
+            result = event.get_result()
+            if not result or not getattr(result, "chain", None):
+                return
+            if not result.is_llm_result():
+                return
+            # 聚合文本
+            parts = []
+            for comp in result.chain:
+                if isinstance(comp, Plain) and getattr(comp, "text", None):
+                    t = comp.text.strip()
+                    if t:
+                        parts.append(t)
+            text = "\n".join(parts).strip()
+            if not text:
+                return
+
+            cm = self.context.conversation_manager
+            uid = event.unified_msg_origin
+            cid = await cm.get_curr_conversation_id(uid)
+            if not cid:
+                cid = await cm.new_conversation(uid)
+            conv = await cm.get_conversation(uid, cid, create_if_not_exists=True)
+            import json as _json
+            msgs = []
+            try:
+                msgs = _json.loads(conv.history) if getattr(conv, "history", "") else []
+            except Exception:
+                msgs = []
+
+            # 若最后一个 assistant 文本已相同，则不重复写入
+            last_ok = False
+            if msgs:
+                last = msgs[-1]
+                if isinstance(last, dict) and last.get("role") == "assistant" and (last.get("content") or "").strip() == text:
+                    last_ok = True
+            if last_ok:
+                return
+
+            msgs.append({"role": "assistant", "content": text})
+            await cm.update_conversation(uid, cid, history=msgs)
+            logging.info("TTSEmotionRouter.history_fallback: appended assistant text to conversation history")
+        except Exception:
+            # 容错：不因兜底写入失败影响主流程
+            pass
