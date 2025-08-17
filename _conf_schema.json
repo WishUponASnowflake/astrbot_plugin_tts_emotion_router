@@ -51,7 +51,7 @@
       "model": { "description": "模型名称", "type": "string", "default": "FunAudioLLM/CosyVoice2-0.5B" },
       "format": { "description": "音频格式(mp3/wav/opus/pcm)", "type": "string", "default": "mp3" },
       "speed": { "description": "默认语速", "type": "float", "default": 1.0 },
-      "gain": { "description": "音量增益（dB，-10~10）", "type": "float", "default": 5.0 },
+      "gain": { "description": "音量增益（dB，-10~10），调低可有效减少电流音", "type": "float", "default": 0 },
       "sample_rate": { "description": "采样率(mp3/wav推荐44100，opus固定48000)", "type": "int", "default": 44100 }
     }
   },
