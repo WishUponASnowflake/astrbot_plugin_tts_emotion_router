@@ -980,9 +980,14 @@ class TTSEmotionRouter(Star):
                 result.set_result_content_type(ResultContentType.LLM_RESULT)
             except Exception:
                 pass
-            # 立即兜底：在发送前将可读文本写入会话历史，规避部分版本在 after_message_sent 前清空链导致的丢写
+            # 立即兜底：使用当前计算得到的文本写入会话历史，避免依赖 result.chain 的最终形态
             try:
-                await self._ensure_history_saved(event)
+                await self._append_assistant_text_to_history(event, text)
+            except Exception:
+                pass
+            # 明确声明不终止事件传播，避免被判定为 STOP 而绕过上下文入库路径
+            try:
+                event.continue_event()
             except Exception:
                 pass
             # 不再调用 stop_event，避免打断 LLMRequestSubStage 的历史写入；
@@ -1013,7 +1018,16 @@ class TTSEmotionRouter(Star):
             text = "\n".join(parts).strip()
             if not text:
                 return
+            await self._append_assistant_text_to_history(event, text)
+        except Exception:
+            # 容错：不因兜底写入失败影响主流程
+            pass
 
+    async def _append_assistant_text_to_history(self, event: AstrMessageEvent, text: str) -> None:
+        """使用已清洗的最终文本，直接写入会话历史（去重且幂等）。"""
+        if not text:
+            return
+        try:
             cm = self.context.conversation_manager
             uid = event.unified_msg_origin
             cid = await cm.get_curr_conversation_id(uid)
@@ -1028,17 +1042,13 @@ class TTSEmotionRouter(Star):
                 msgs = []
 
             # 若最后一个 assistant 文本已相同，则不重复写入
-            last_ok = False
             if msgs:
                 last = msgs[-1]
-                if isinstance(last, dict) and last.get("role") == "assistant" and (last.get("content") or "").strip() == text:
-                    last_ok = True
-            if last_ok:
-                return
+                if isinstance(last, dict) and last.get("role") == "assistant" and (last.get("content") or "").strip() == text.strip():
+                    return
 
-            msgs.append({"role": "assistant", "content": text})
+            msgs.append({"role": "assistant", "content": text.strip()})
             await cm.update_conversation(uid, cid, history=msgs)
             logging.info("TTSEmotionRouter.history_fallback: appended assistant text to conversation history")
         except Exception:
-            # 容错：不因兜底写入失败影响主流程
             pass
