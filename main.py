@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 import importlib
 from typing import Dict, List, Optional
+import asyncio
 
 def _ensure_compatible_astrbot():
     """确保 astrbot API 兼容；若宿主 astrbot 不满足需要，则回退到插件自带的 AstrBot。"""
@@ -1163,11 +1164,17 @@ class TTSEmotionRouter(Star):
             self._recent_sends[sig] = time.time()
 
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            # 统一保留 Plain+Record，让核心流水线负责入库；避免只发音频导致的历史缺失。
-            # 若平台不希望混发，可通过 allow_mixed 配置后续优化为仅音频并在 after_message_sent 兜底入库。
+            # 统一保留 Plain+Record，让核心流水线负责入库；同时尝试直接幂等写库，双保险。
             result.chain = [Plain(text=text), Record(file=str(audio_path))]
             try:
-                logging.debug("TTS finalize: keep Plain+Record for history, text_len=%d", len(text))
+                _hp = any(isinstance(c, Plain) for c in result.chain)
+                _hr = any(isinstance(c, Record) for c in result.chain)
+                logging.info("TTS finalize: keep Plain+Record (has_plain=%s, has_record=%s), text_len=%d", _hp, _hr, len(text))
+            except Exception:
+                pass
+            # 直写历史（幂等），即便后续插件移除了 Plain 也不丢文本
+            try:
+                _ = await self._append_assistant_text_to_history(event, text)
             except Exception:
                 pass
             try:
@@ -1210,8 +1217,13 @@ class TTSEmotionRouter(Star):
             result = event.get_result()
             if not result or not getattr(result, "chain", None):
                 return
-            # 兼容不同 AstrBot 版本：如果未被标记为 LLM_RESULT，则只要链中包含本插件生成的语音也应补写历史
-            if not result.is_llm_result() and not any(self._is_our_record(c) for c in result.chain):
+            # 兼容不同 AstrBot 版本：若无法判断 is_llm_result，则仅以“链中含本插件音频”为条件。
+            is_llm = False
+            try:
+                is_llm = bool(result.is_llm_result())
+            except Exception:
+                is_llm = False
+            if not is_llm and not any(self._is_our_record(c) for c in result.chain):
                 return
             # 聚合文本
             parts = []
@@ -1243,24 +1255,37 @@ class TTSEmotionRouter(Star):
         try:
             cm = self.context.conversation_manager
             uid = event.unified_msg_origin
-            # 优先从 provider_request 中拿到当前请求的对话ID，避免误创建新会话
+            # 获取会话ID：优先 provider_request，其次当前活跃会话；若暂不可用，小退避重试
             cid = None
-            try:
-                req = getattr(event, "get_extra", None) and event.get_extra("provider_request")
-                if req and getattr(req, "conversation", None) and getattr(req.conversation, "cid", None):
-                    cid = req.conversation.cid
-            except Exception:
-                cid = None
+            for attempt in range(3):
+                try:
+                    req = getattr(event, "get_extra", None) and event.get_extra("provider_request")
+                    if req and getattr(req, "conversation", None) and getattr(req.conversation, "cid", None):
+                        cid = req.conversation.cid
+                except Exception:
+                    cid = None
+                if not cid:
+                    try:
+                        cid = await cm.get_curr_conversation_id(uid)
+                    except Exception:
+                        cid = None
+                if cid:
+                    break
+                # 等待会话在核心落库
+                await asyncio.sleep(0.2)
             if not cid:
-                cid = await cm.get_curr_conversation_id(uid)
-            # 若仍无法确定当前对话，放弃写入，避免误创建新会话导致上下文割裂
-            if not cid:
-                logging.info("TTSEmotionRouter.history_fallback: skip write, no active conversation id")
+                logging.info("TTSEmotionRouter.history_fallback: skip write, no active conversation id after retry")
                 return False
-            # 仅当对话确实存在时才写入，避免 get_conversation 的 create_if_not_exists 分配新ID
+            # 获取会话体，优先不创建；若仍未就绪，小退避后允许创建一次，避免错过本轮文本
             conv = await cm.get_conversation(uid, cid, create_if_not_exists=False)
             if not conv:
-                logging.info("TTSEmotionRouter.history_fallback: skip write, conversation not found for cid=%s", cid)
+                await asyncio.sleep(0.2)
+                try:
+                    conv = await cm.get_conversation(uid, cid, create_if_not_exists=True)
+                except Exception:
+                    conv = None
+            if not conv:
+                logging.info("TTSEmotionRouter.history_fallback: conversation still not available for cid=%s", cid)
                 return False
             import json as _json
             msgs = []
