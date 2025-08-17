@@ -816,7 +816,7 @@ class TTSEmotionRouter(Star):
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
     # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
     if hasattr(filter, "after_message_sent"):
-        @filter.after_message_sent(priority=10000)
+        @filter.after_message_sent(priority=100)
         async def after_message_sent(self, event: AstrMessageEvent):
             # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
@@ -856,7 +856,7 @@ class TTSEmotionRouter(Star):
             except Exception:
                 pass
     elif hasattr(filter, "on_after_message_sent"):
-        @filter.on_after_message_sent(priority=10000)
+        @filter.on_after_message_sent(priority=100)
         async def after_message_sent(self, event: AstrMessageEvent):
             # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
@@ -900,7 +900,7 @@ class TTSEmotionRouter(Star):
             return
 
     # ---------------- Core hook -----------------
-    @filter.on_decorating_result(priority=10000)
+    @filter.on_decorating_result(priority=100)
     async def on_decorating_result(self, event: AstrMessageEvent):
         # 在入口处尽可能声明继续传播，避免被归因为终止传播
         try:
@@ -936,18 +936,12 @@ class TTSEmotionRouter(Star):
     # 不再在此处清空单个 Record 的链，改为在后续统一移除“本插件生成的 Record”，以保留文本给历史保存。
 
         # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
+        do_synth = True
         try:
-            # 先移除链中任何属于本插件的 Record，避免被后续阶段再次发送
+            # 如链中已有本插件生成的语音，则本轮仅保留现状，不再二次合成，避免重复音频
             if any(self._is_our_record(c) for c in result.chain):
-                result.chain = [c for c in result.chain if not self._is_our_record(c)]
-                logging.info("skip duplicate event: purged our TTS Record(s) from chain before finalize")
-                if not result.chain:
-                    # 不再调用 stop_event，避免影响后续阶段（如历史保存）
-                    try:
-                        event.continue_event()
-                    except Exception:
-                        pass
-                    return
+                logging.info("skip duplicate event: chain already contains our TTS Record, skip synth")
+                do_synth = False
 
             new_chain = []
             cleaned_once = False
@@ -1009,7 +1003,7 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-        # 事件级签名去重（应对流水线二次触发/并发触发）
+    # 事件级签名去重（应对流水线二次触发/并发触发）
         try:
             md5 = hashlib.md5(text.encode("utf-8")).hexdigest()
             sig = f"{sid}|{md5}"
@@ -1025,23 +1019,13 @@ class TTSEmotionRouter(Star):
             pass
         # 并发中的同签名，直接阻断
         if sig in self._inflight_sigs:
-            logging.info("skip duplicate event: inflight sig=%s", sig)
-            # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
+            logging.info("skip duplicate event: inflight sig=%s (no-op, keep existing chain)", sig)
+            do_synth = False
         # 短时间内重复同签名，直接阻断
         last = self._recent_sends.get(sig)
         if last and (now - last) < 8.0:
-            logging.info("skip duplicate event: recent sig=%s, dt=%.2fs", sig, now - last)
-            # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
+            logging.info("skip duplicate event: recent sig=%s, dt=%.2fs (no-op)", sig, now - last)
+            do_synth = False
 
         # 随机/冷却/长度
         st = self._session_state.setdefault(sid, SessionState())
@@ -1133,12 +1117,8 @@ class TTSEmotionRouter(Star):
         now = time.time()
         if (st.last_tts_content == text and 
             (now - st.last_tts_time) < 8.0):
-            logging.info(f"TTS: 跳过重复内容，间隔={now - st.last_tts_time:.2f}s, text={text[:30]}...")
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
+            logging.info(f"TTS: 跳过重复内容(no-op)，间隔={now - st.last_tts_time:.2f}s, text={text[:30]}...")
+            do_synth = False
         
         # 最后一重防线：若 TTS 前文本仍以 emo/token 开头，强制清理
         try:
@@ -1149,7 +1129,13 @@ class TTSEmotionRouter(Star):
                 text, _ = self._strip_emo_head_many(text)
         except Exception:
             pass
-    # 进入并发保护区
+        if not do_synth:
+            try:
+                event.continue_event()
+            except Exception:
+                pass
+            return
+        # 进入并发保护区
         self._inflight_sigs.add(sig)
         try:
             audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
