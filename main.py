@@ -587,6 +587,11 @@ class TTSEmotionRouter(Star):
                 if l1 in EMOTIONS:
                     label = l1
                 response.completion_text = cleaned
+                # 兼容某些 AstrBot 内部使用 _completion_text 的实现，显式同步私有字段
+                try:
+                    setattr(response, "_completion_text", cleaned)
+                except Exception:
+                    pass
                 cached_text = cleaned or cached_text
         except Exception:
             pass
@@ -609,6 +614,12 @@ class TTSEmotionRouter(Star):
                             label = l2
                         if t:
                             new_chain.append(Plain(text=t))
+                            # 若 completion_text 为空，则用首个 Plain 的清洗文本回填到 _completion_text
+                            try:
+                                if t and not getattr(response, "_completion_text", None):
+                                    setattr(response, "_completion_text", t)
+                            except Exception:
+                                pass
                             cached_text = t or cached_text
                         cleaned_once = True
                     else:
@@ -907,6 +918,28 @@ class TTSEmotionRouter(Star):
             event.continue_event()
         except Exception:
             pass
+        try:
+            logging.debug("TTSEmotionRouter.on_decorating_result: entry is_stopped=%s", event.is_stopped())
+        except Exception:
+            pass
+        # 确保有一个结果对象，并标记为 LLM_RESULT，避免后续阶段误判
+        try:
+            res = event.get_result()
+            if res is None:
+                res = event.make_result()
+                event.set_result(res)
+            try:
+                res.set_result_content_type(ResultContentType.LLM_RESULT)
+            except Exception:
+                pass
+            try:
+                # 若已有 STOP 标记，直接在结果对象上清除
+                if hasattr(res, "continue_event") and res.is_stopped():
+                    res.continue_event()
+            except Exception:
+                pass
+        except Exception:
+            pass
         # 若进入本阶段已为 STOP，记录并主动切回 CONTINUE，避免被判定“终止传播”
         try:
             if event.is_stopped():
@@ -1141,6 +1174,10 @@ class TTSEmotionRouter(Star):
             audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
             if not audio_path:
                 logging.error("TTS调用失败，降级为文本")
+                try:
+                    event.continue_event()
+                except Exception:
+                    pass
                 return
 
             # 更新去重状态
@@ -1152,6 +1189,12 @@ class TTSEmotionRouter(Star):
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
             # 统一保留 Plain+Record，让核心流水线负责入库；同时尝试直接幂等写库，双保险。
             result.chain = [Plain(text=text), Record(file=str(audio_path))]
+            try:
+                # 显式确保结果为 CONTINUE 并回填到事件
+                result.continue_event()
+                event.set_result(result)
+            except Exception:
+                pass
             try:
                 _hp = any(isinstance(c, Plain) for c in result.chain)
                 _hr = any(isinstance(c, Record) for c in result.chain)
@@ -1193,6 +1236,12 @@ class TTSEmotionRouter(Star):
             except Exception:
                 pass
             self._inflight_sigs.discard(sig)
+        # 兜底：函数出口再次声明继续传播
+        try:
+            logging.debug("TTSEmotionRouter.on_decorating_result: exit is_stopped=%s", event.is_stopped())
+            event.continue_event()
+        except Exception:
+            pass
 
     async def _ensure_history_saved(self, event: AstrMessageEvent) -> None:
         """兜底：保证本轮助手可读文本写入到会话历史。
