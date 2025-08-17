@@ -653,23 +653,52 @@ class TTSEmotionRouter(Star):
         )
 
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
-    @filter.on_after_message_sent()
-    async def after_message_sent(self, event: AstrMessageEvent):
-        try:
-            result = event.get_result()
-            if not result or not getattr(result, "chain", None):
-                return
-            if len(result.chain) == 1 and isinstance(result.chain[0], Record):
-                rec = result.chain[0]
-                f = getattr(rec, "file", "") or ""
-                if f:
-                    fpath = Path(f)
-                    if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
-                        # 该条消息我们已发送完成，清空链以阻止后续 RespondStage 重复发送
-                        result.chain = []
-                        logging.info("after_message_sent: cleared chain to prevent duplicate resend for %s", fpath.name)
-        except Exception:
-            pass
+    # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
+    if hasattr(filter, "after_message_sent"):
+        @filter.after_message_sent()
+        async def after_message_sent(self, event: AstrMessageEvent):
+            try:
+                result = event.get_result()
+                if not result or not getattr(result, "chain", None):
+                    return
+                if len(result.chain) == 1 and isinstance(result.chain[0], Record):
+                    rec = result.chain[0]
+                    f = getattr(rec, "file", "") or ""
+                    if f:
+                        fpath = Path(f)
+                        if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
+                            # 该条消息我们已发送完成，清空链以阻止后续 RespondStage 重复发送
+                            result.chain = []
+                            logging.info(
+                                "after_message_sent: cleared chain to prevent duplicate resend for %s",
+                                fpath.name,
+                            )
+            except Exception:
+                pass
+    elif hasattr(filter, "on_after_message_sent"):
+        @filter.on_after_message_sent()
+        async def after_message_sent(self, event: AstrMessageEvent):
+            try:
+                result = event.get_result()
+                if not result or not getattr(result, "chain", None):
+                    return
+                if len(result.chain) == 1 and isinstance(result.chain[0], Record):
+                    rec = result.chain[0]
+                    f = getattr(rec, "file", "") or ""
+                    if f:
+                        fpath = Path(f)
+                        if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
+                            result.chain = []
+                            logging.info(
+                                "after_message_sent: cleared chain to prevent duplicate resend for %s",
+                                fpath.name,
+                            )
+            except Exception:
+                pass
+    else:
+        async def after_message_sent(self, event: AstrMessageEvent):
+            # 当前 AstrBot 版本不支持 after_message_sent 钩子，忽略。
+            return
 
     # ---------------- Core hook -----------------
     @filter.on_decorating_result()
