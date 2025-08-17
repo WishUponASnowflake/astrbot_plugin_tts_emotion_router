@@ -861,9 +861,9 @@ class TTSEmotionRouter(Star):
                     )
                 except Exception:
                     pass
-                # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
+                # 兜底：若为 LLM 结果且包含任意语音（不局限于本插件），确保将可读文本写入对话历史
                 try:
-                    if any(self._is_our_record(c) for c in result.chain):
+                    if any(isinstance(c, Record) for c in result.chain):
                         await self._ensure_history_saved(event)
                 except Exception:
                     pass
@@ -925,9 +925,9 @@ class TTSEmotionRouter(Star):
                     )
                 except Exception:
                     pass
-                # 兜底：若本轮为 LLM 结果且包含本插件生成的语音，确保将可读文本写入对话历史
+                # 兜底：若为 LLM 结果且包含任意语音（不局限于本插件），确保将可读文本写入对话历史
                 try:
-                    if any(self._is_our_record(c) for c in result.chain):
+                    if any(isinstance(c, Record) for c in result.chain):
                         await self._ensure_history_saved(event)
                 except Exception:
                     pass
@@ -967,27 +967,10 @@ class TTSEmotionRouter(Star):
         except Exception:
             pass
         try:
-            logging.debug("TTSEmotionRouter.on_decorating_result: entry is_stopped=%s", event.is_stopped())
+            logging.info("TTSEmotionRouter.on_decorating_result: entry is_stopped=%s", event.is_stopped())
         except Exception:
             pass
-        # 确保有一个结果对象，并标记为 LLM_RESULT，避免后续阶段误判
-        try:
-            res = event.get_result()
-            if res is None:
-                res = event.make_result()
-                event.set_result(res)
-            try:
-                res.set_result_content_type(ResultContentType.LLM_RESULT)
-            except Exception:
-                pass
-            try:
-                # 若已有 STOP 标记，直接在结果对象上清除
-                if hasattr(res, "continue_event") and res.is_stopped():
-                    res.continue_event()
-            except Exception:
-                pass
-        except Exception:
-            pass
+    # 尽量不改动结果对象，避免被其他阶段误判；仅声明继续传播
         # 若进入本阶段已为 STOP，记录并主动切回 CONTINUE，避免被判定“终止传播”
         try:
             if event.is_stopped():
@@ -1237,12 +1220,7 @@ class TTSEmotionRouter(Star):
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
             # 统一保留 Plain+Record，让核心流水线负责入库；同时尝试直接幂等写库，双保险。
             result.chain = [Plain(text=text), Record(file=str(audio_path))]
-            try:
-                # 显式确保结果为 CONTINUE 并回填到事件
-                result.continue_event()
-                event.set_result(result)
-            except Exception:
-                pass
+            # 不显式修改事件结果类型，避免和其他插件交互产生误判
             try:
                 _hp = any(isinstance(c, Plain) for c in result.chain)
                 _hr = any(isinstance(c, Record) for c in result.chain)
@@ -1284,9 +1262,9 @@ class TTSEmotionRouter(Star):
             except Exception:
                 pass
             self._inflight_sigs.discard(sig)
-        # 兜底：函数出口再次声明继续传播
+        # 兜底：函数出口再次声明继续传播（不改 result 对象）
         try:
-            logging.debug("TTSEmotionRouter.on_decorating_result: exit is_stopped=%s", event.is_stopped())
+            logging.info("TTSEmotionRouter.on_decorating_result: exit is_stopped=%s", event.is_stopped())
             event.continue_event()
         except Exception:
             pass
