@@ -756,6 +756,11 @@ class TTSEmotionRouter(Star):
                     event.continue_event()
                 except Exception:
                     pass
+                # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
+                try:
+                    _ = event.get_result()
+                except Exception:
+                    pass
             except Exception:
                 pass
     elif hasattr(filter, "on_after_message_sent"):
@@ -791,6 +796,11 @@ class TTSEmotionRouter(Star):
                     event.continue_event()
                 except Exception:
                     pass
+                # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
+                try:
+                    _ = event.get_result()
+                except Exception:
+                    pass
             except Exception:
                 pass
     else:
@@ -815,12 +825,20 @@ class TTSEmotionRouter(Star):
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
             logging.info("TTS skip: session disabled (%s)", sid)
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
         # 结果链
         result = event.get_result()
         if not result or not result.chain:
             logging.debug("TTS skip: empty result chain")
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
     # 不再在此处清空单个 Record 的链，改为在后续统一移除“本插件生成的 Record”，以保留文本给历史保存。
@@ -833,6 +851,10 @@ class TTSEmotionRouter(Star):
                 logging.info("skip duplicate event: purged our TTS Record(s) from chain before finalize")
                 if not result.chain:
                     # 不再调用 stop_event，避免影响后续阶段（如历史保存）
+                    try:
+                        event.continue_event()
+                    except Exception:
+                        pass
                     return
 
             new_chain = []
@@ -858,6 +880,10 @@ class TTSEmotionRouter(Star):
         # 是否允许混合
         if not self.allow_mixed and any(not isinstance(c, Plain) for c in result.chain):
             logging.info("TTS skip: mixed content not allowed (allow_mixed=%s)", self.allow_mixed)
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
     # 拼接纯文本
@@ -868,6 +894,10 @@ class TTSEmotionRouter(Star):
         ]
         if not text_parts:
             logging.debug("TTS skip: no plain text parts after cleaning")
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
         text = " ".join(text_parts)
 
@@ -881,6 +911,10 @@ class TTSEmotionRouter(Star):
             r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I
         ):
             logging.info("TTS skip: detected link/attachment tokens")
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
         # 事件级签名去重（应对流水线二次触发/并发触发）
@@ -901,12 +935,20 @@ class TTSEmotionRouter(Star):
         if sig in self._inflight_sigs:
             logging.info("skip duplicate event: inflight sig=%s", sig)
             # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
         # 短时间内重复同签名，直接阻断
         last = self._recent_sends.get(sig)
         if last and (now - last) < 8.0:
             logging.info("skip duplicate event: recent sig=%s, dt=%.2fs", sig, now - last)
             # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
         # 随机/冷却/长度
@@ -914,16 +956,28 @@ class TTSEmotionRouter(Star):
         now = time.time()
         if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
             logging.info("TTS skip: cooldown active (%.2fs < %ss)", now - st.last_ts, self.cooldown)
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
         # 长度限制
         if self.text_limit > 0 and len(text) > self.text_limit:
             logging.info("TTS skip: over text_limit (len=%d > limit=%d)", len(text), self.text_limit)
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
         # 随机概率
         if random.random() > self.prob:
             logging.info("TTS skip: probability gate (prob=%.2f)", self.prob)
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
         # 情绪选择：优先使用隐藏标记 -> 启发式
@@ -946,6 +1000,10 @@ class TTSEmotionRouter(Star):
         vkey, voice = self._pick_voice_for_emotion(emotion)
         if not voice:
             logging.warning("No voice mapped for emotion=%s", emotion)
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             return
 
         # 依据情绪选择语速（未配置则为 None -> 使用默认）
@@ -1010,8 +1068,12 @@ class TTSEmotionRouter(Star):
             self._recent_sends[sig] = time.time()
 
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            # 保留文本和语音，保证上下游插件和上下文不丢失
-            result.chain = [Plain(text=text), Record(file=str(audio_path))]
+            # 按项目约定：最终仅保留语音 Record，避免重复发送；文本已通过历史兜底写入
+            result.chain = [Record(file=str(audio_path))]
+            try:
+                event.continue_event()
+            except Exception:
+                pass
             # 缓存本轮可读文本
             try:
                 st.last_assistant_text = text.strip()
