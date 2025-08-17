@@ -8,8 +8,24 @@ import re
 import time
 import hashlib
 from dataclasses import dataclass
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
+
+# 优先使用宿主 AstrBot，避免插件内自带的 AstrBot 目录（如 ./AstrBot/astrbot）造成类型不一致
+try:
+    _PLUGIN_DIR = Path(__file__).parent
+    _VENDORED_ASTROBOT = _PLUGIN_DIR / "AstrBot" / "astrbot"
+    if _VENDORED_ASTROBOT.exists() and "astrbot" not in sys.modules:
+        _orig_sys_path = list(sys.path)
+        try:
+            root_str = str(_PLUGIN_DIR)
+            sys.path = [p for p in sys.path if not (isinstance(p, str) and p.startswith(root_str))]
+            __import__("astrbot")  # 预先导入宿主 AstrBot
+        finally:
+            sys.path = _orig_sys_path
+except Exception:
+    pass
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
