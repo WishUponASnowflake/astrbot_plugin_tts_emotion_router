@@ -758,8 +758,8 @@ class TTSEmotionRouter(Star):
         st.last_tts_content = text
         st.last_tts_time = now
         st.last_ts = time.time()
-        
-    logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-    result.chain = [Record(file=str(audio_path))]
-    event.stop_event()  # 关键：TTS合成后立即终止事件传播，防止重复
-    return
+
+        logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
+        result.chain = [Record(file=str(audio_path))]
+        event.stop_event()  # 关键：TTS合成后立即终止事件传播，防止重复
+        return
