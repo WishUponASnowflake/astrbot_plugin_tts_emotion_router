@@ -18,6 +18,7 @@
 1. 将本目录放入 `data/plugins/tts_emotion_router/`。
 2. 安装依赖（项目根目录）：`uv sync`（已包含 `requests`）。
 3. 启动 AstrBot：`uv run main.py`（WebUI 默认 http://localhost:6185）。
+4. 首次使用请先安装 ffmpeg，并将其加入 PATH 环境变量。
 
 ## 面板配置
 - API（必填）
