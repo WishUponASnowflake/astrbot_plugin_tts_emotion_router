@@ -24,7 +24,7 @@
   - `api.url`: 例如 `https://api.siliconflow.cn/v1`
   - `api.key`: 你的 API Key（不要提交到公共仓库）
   - `api.model`: 例如 `FunAudioLLM/CosyVoice2-0.5B`
-  - `api.format`: `wav`（默认）
+  - `api.format`: `mp3`（默认，跨端播放更稳）
   - `api.speed`: 默认语速（1.0）
 - 情绪策略（无需小模型）
   - `emotion.marker.enable`: 启用隐藏标记解析
@@ -63,8 +63,13 @@
 
 ## 版本与作者
 - 作者：木有知
-- 版本：0.1.0
+- 版本：0.1.1
 - 许可证：MIT（随 AstrBot 项目）
+
+## 打包与发布建议
+- 不要把 `AstrBot/` 目录放进发布包，避免与宿主冲突；
+- 仅保留插件必要文件，排除 `.venv/`、`temp/`、`__pycache__/`、打包产物等；
+- 安装时“同名文件夹”和“同名 zip”二选一，不要同时存在。
 
 ## 安全与合规
 - 别把 API Key、私有音色 ID 等敏感信息提交到仓库；
