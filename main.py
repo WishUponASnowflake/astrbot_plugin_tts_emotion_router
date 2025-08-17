@@ -980,6 +980,11 @@ class TTSEmotionRouter(Star):
                 result.set_result_content_type(ResultContentType.LLM_RESULT)
             except Exception:
                 pass
+            # 立即兜底：在发送前将可读文本写入会话历史，规避部分版本在 after_message_sent 前清空链导致的丢写
+            try:
+                await self._ensure_history_saved(event)
+            except Exception:
+                pass
             # 不再调用 stop_event，避免打断 LLMRequestSubStage 的历史写入；
             # RespondStage 会负责发送并在末尾 clear_result。
             return
@@ -995,7 +1000,8 @@ class TTSEmotionRouter(Star):
             result = event.get_result()
             if not result or not getattr(result, "chain", None):
                 return
-            if not result.is_llm_result():
+            # 兼容不同 AstrBot 版本：如果未被标记为 LLM_RESULT，则只要链中包含本插件生成的语音也应补写历史
+            if not result.is_llm_result() and not any(self._is_our_record(c) for c in result.chain):
                 return
             # 聚合文本
             parts = []
