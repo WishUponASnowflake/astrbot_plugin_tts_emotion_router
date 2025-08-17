@@ -827,13 +827,26 @@ class TTSEmotionRouter(Star):
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
     # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
     if hasattr(filter, "after_message_sent"):
-        @filter.after_message_sent(priority=100)
+        @filter.after_message_sent(priority=-1000)
         async def after_message_sent(self, event: AstrMessageEvent):
             # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
                 # 确保不被判定为终止传播
                 try:
                     event.continue_event()
+                except Exception:
+                    pass
+                try:
+                    res = event.get_result()
+                    if res is None:
+                        res = event.make_result()
+                        event.set_result(res)
+                    if hasattr(res, "continue_event"):
+                        res.continue_event()
+                except Exception:
+                    pass
+                try:
+                    logging.debug("TTSEmotionRouter.after_message_sent: entry is_stopped=%s", event.is_stopped())
                 except Exception:
                     pass
                 result = event.get_result()
@@ -859,21 +872,45 @@ class TTSEmotionRouter(Star):
                     event.continue_event()
                 except Exception:
                     pass
+                try:
+                    res = event.get_result()
+                    if res is not None and hasattr(res, "continue_event"):
+                        res.continue_event()
+                        event.set_result(res)
+                except Exception:
+                    pass
                 # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
                 try:
                     _ = event.get_result()
+                except Exception:
+                    pass
+                try:
+                    logging.debug("TTSEmotionRouter.after_message_sent: exit is_stopped=%s", event.is_stopped())
                 except Exception:
                     pass
             except Exception:
                 pass
     elif hasattr(filter, "on_after_message_sent"):
-        @filter.on_after_message_sent(priority=100)
+        @filter.on_after_message_sent(priority=-1000)
         async def after_message_sent(self, event: AstrMessageEvent):
             # 仅记录诊断信息，不再清空链，避免影响历史写入/上下文。
             try:
                 # 确保不被判定为终止传播
                 try:
                     event.continue_event()
+                except Exception:
+                    pass
+                try:
+                    res = event.get_result()
+                    if res is None:
+                        res = event.make_result()
+                        event.set_result(res)
+                    if hasattr(res, "continue_event"):
+                        res.continue_event()
+                except Exception:
+                    pass
+                try:
+                    logging.debug("TTSEmotionRouter.after_message_sent: entry(is_compat) is_stopped=%s", event.is_stopped())
                 except Exception:
                     pass
                 result = event.get_result()
@@ -899,9 +936,20 @@ class TTSEmotionRouter(Star):
                     event.continue_event()
                 except Exception:
                     pass
+                try:
+                    res = event.get_result()
+                    if res is not None and hasattr(res, "continue_event"):
+                        res.continue_event()
+                        event.set_result(res)
+                except Exception:
+                    pass
                 # 兼容部分框架对“未产出/未修改”的停止判定，进行一次无害的 get_result 访问
                 try:
                     _ = event.get_result()
+                except Exception:
+                    pass
+                try:
+                    logging.debug("TTSEmotionRouter.after_message_sent: exit(is_compat) is_stopped=%s", event.is_stopped())
                 except Exception:
                     pass
             except Exception:
@@ -911,7 +959,7 @@ class TTSEmotionRouter(Star):
             return
 
     # ---------------- Core hook -----------------
-    @filter.on_decorating_result(priority=100)
+    @filter.on_decorating_result(priority=-1000)
     async def on_decorating_result(self, event: AstrMessageEvent):
         # 在入口处尽可能声明继续传播，避免被归因为终止传播
         try:
