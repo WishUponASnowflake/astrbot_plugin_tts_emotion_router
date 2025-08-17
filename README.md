@@ -1,6 +1,6 @@
 # astrabot_plugin_tts_emotion_router
 
-按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，OpenAI 语音接口风格）。
+按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，OpenAI 语音接口适配）。
 
 ## 功能特性
 - 将 LLM 文本回复按概率/长度/冷却等门控转换为语音（Record），失败回退文本。
@@ -43,6 +43,10 @@
 - 开启 `emotion.marker.enable`；填写 `voice_map` 与 `speed_map`；保存并重载插件。
 - 发送短句测试不同情绪，验证音色/语速切换。
 
+## 硅基流动一键上传音色工具
+不会上传硅基cosyvoice音色？直接到 [Releases](https://github.com/你的用户名/你的仓库/releases) 页面下载 exe 附件，双击即可用！
+需要准备的东西：5Mb以下的10s左右的清晰干净的人声素材，音频所对应的文本，一个硅基流动apikey（音色绑定apikey，建议单独开一个apikey）
+
 ## 指令速查
 - `tts_global_on` / `tts_global_off` — 全局开关（黑名单/白名单模式）
 - `tts_on` / `tts_off` — 当前会话开/关
@@ -66,11 +70,4 @@
 - 版本：0.1.1
 - 许可证：MIT（随 AstrBot 项目）
 
-## 打包与发布建议
-- 不要把 `AstrBot/` 目录放进发布包，避免与宿主冲突；
-- 仅保留插件必要文件，排除 `.venv/`、`temp/`、`__pycache__/`、打包产物等；
-- 安装时“同名文件夹”和“同名 zip”二选一，不要同时存在。
 
-## 安全与合规
-- 别把 API Key、私有音色 ID 等敏感信息提交到仓库；
-- 仓库中不包含任何个人密钥与私人配置，部署时请在 WebUI 面板填写。
