@@ -184,6 +184,9 @@ class TTSEmotionRouter(Star):
             self._emo_head_anylabel_re = None
 
         self._session_state: Dict[str, SessionState] = {}
+        # 事件级防重：最近发送签名与进行中签名
+        self._recent_sends: Dict[str, float] = {}
+        self._inflight_sigs: set[str] = set()
         ensure_dir(TEMP_DIR)
         # 初始清理：删除超过2小时的文件
         cleanup_dir(TEMP_DIR, ttl_seconds=2 * 3600)
@@ -723,6 +726,32 @@ class TTSEmotionRouter(Star):
         ):
             return
 
+        # 事件级签名去重（应对流水线二次触发/并发触发）
+        try:
+            md5 = hashlib.md5(text.encode("utf-8")).hexdigest()
+            sig = f"{sid}|{md5}"
+        except Exception:
+            sig = f"{sid}|{len(text)}"
+        now = time.time()
+        # 清理过期项（懒清理）
+        try:
+            if len(self._recent_sends) > 1024:
+                cutoff = now - 60.0
+                self._recent_sends = {k: t for k, t in self._recent_sends.items() if t >= cutoff}
+        except Exception:
+            pass
+        # 并发中的同签名，直接阻断
+        if sig in self._inflight_sigs:
+            logging.info("skip duplicate event: inflight sig=%s", sig)
+            event.stop_event()
+            return
+        # 短时间内重复同签名，直接阻断
+        last = self._recent_sends.get(sig)
+        if last and (now - last) < 8.0:
+            logging.info("skip duplicate event: recent sig=%s, dt=%.2fs", sig, now - last)
+            event.stop_event()
+            return
+
         # 随机/冷却/长度
         st = self._session_state.setdefault(sid, SessionState())
         now = time.time()
@@ -806,17 +835,23 @@ class TTSEmotionRouter(Star):
                 text, _ = self._strip_emo_head_many(text)
         except Exception:
             pass
-        audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
-        if not audio_path:
-            logging.error("TTS调用失败，降级为文本")
+        # 进入并发保护区
+        self._inflight_sigs.add(sig)
+        try:
+            audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
+            if not audio_path:
+                logging.error("TTS调用失败，降级为文本")
+                return
+
+            # 更新去重状态
+            st.last_tts_content = text
+            st.last_tts_time = now
+            st.last_ts = time.time()
+            self._recent_sends[sig] = time.time()
+
+            logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
+            result.chain = [Record(file=str(audio_path))]
+            event.stop_event()  # 关键：TTS合成后立即终止事件传播，防止重复
             return
-
-        # 更新去重状态
-        st.last_tts_content = text
-        st.last_tts_time = now
-        st.last_ts = time.time()
-
-        logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-        result.chain = [Record(file=str(audio_path))]
-        event.stop_event()  # 关键：TTS合成后立即终止事件传播，防止重复
-        return
+        finally:
+            self._inflight_sigs.discard(sig)
