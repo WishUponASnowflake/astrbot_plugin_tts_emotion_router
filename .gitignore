@@ -4,9 +4,21 @@ __pycache__/
 
 # Temp & outputs
 temp/
+.temp/
 *.wav
 *.mp3
 *.m4a
+
+# Local env
+.venv/
+.env/
+
+# Vendored framework (must NOT ship)
+AstrBot/
+
+# Editor
+.vscode/
+.idea/
 
 # Local config (use panel or sample file)
 config.json
