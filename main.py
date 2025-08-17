@@ -444,6 +444,14 @@ class TTSEmotionRouter(Star):
     async def on_llm_request(self, event: AstrMessageEvent, request):
         """在系统提示中加入隐藏情绪标记指令，让 LLM 先输出 [EMO:xxx] 再回答。"""
         if not self.emo_marker_enable:
+            # 简要调试：记录上下文条数与本轮 prompt 长度，便于排查“上下文丢失”
+            try:
+                ctxs = getattr(request, "contexts", None)
+                clen = len(ctxs) if isinstance(ctxs, list) else 0
+                plen = len(getattr(request, "prompt", "") or "")
+                logging.debug(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
+            except Exception:
+                pass
             return
         try:
             tag = self.emo_marker_tag
@@ -456,6 +464,14 @@ class TTSEmotionRouter(Star):
                 "angry(生气/愤怒/恼火/furious)、neutral(平静/普通/困惑/confused)。"
             )
             request.system_prompt = (request.system_prompt or "") + "\n" + instr
+            # 简要调试：记录上下文条数与本轮 prompt 长度，便于排查“上下文丢失”
+            try:
+                ctxs = getattr(request, "contexts", None)
+                clen = len(ctxs) if isinstance(ctxs, list) else 0
+                plen = len(getattr(request, "prompt", "") or "")
+                logging.debug(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -740,7 +756,7 @@ class TTSEmotionRouter(Star):
                             "skip duplicate event: cleared existing TTS Record(%s) to prevent re-send",
                             fpath.name,
                         )
-                        event.stop_event()
+                        # 不再调用 stop_event，避免打断上游 LLM 阶段的历史保存
                         return
         except Exception:
             pass
@@ -752,7 +768,7 @@ class TTSEmotionRouter(Star):
                 result.chain = [c for c in result.chain if not self._is_our_record(c)]
                 logging.info("skip duplicate event: purged our TTS Record(s) from chain before finalize")
                 if not result.chain:
-                    event.stop_event()
+                    # 不再调用 stop_event，避免影响后续阶段（如历史保存）
                     return
 
             new_chain = []
@@ -817,13 +833,13 @@ class TTSEmotionRouter(Star):
         # 并发中的同签名，直接阻断
         if sig in self._inflight_sigs:
             logging.info("skip duplicate event: inflight sig=%s", sig)
-            event.stop_event()
+            # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
             return
         # 短时间内重复同签名，直接阻断
         last = self._recent_sends.get(sig)
         if last and (now - last) < 8.0:
             logging.info("skip duplicate event: recent sig=%s, dt=%.2fs", sig, now - last)
-            event.stop_event()
+            # 不调用 stop_event，仅终止本装饰逻辑，保留上游流程（包括历史保存）
             return
 
         # 随机/冷却/长度
@@ -926,7 +942,8 @@ class TTSEmotionRouter(Star):
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
             # 保留文本和语音，保证上下游插件和上下文不丢失
             result.chain = [Plain(text=text), Record(file=str(audio_path))]
-            event.stop_event()  # 关键：TTS合成后立即终止事件传播，防止重复
+            # 不再调用 stop_event，避免打断 LLMRequestSubStage 的历史写入；
+            # RespondStage 会负责发送并在末尾 clear_result。
             return
         finally:
             self._inflight_sigs.discard(sig)
