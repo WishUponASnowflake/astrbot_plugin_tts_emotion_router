@@ -10,18 +10,35 @@ import hashlib
 from dataclasses import dataclass
 import sys
 from pathlib import Path
+import importlib
 from typing import Dict, List, Optional
 
 # 优先使用宿主 AstrBot，避免插件内自带的 AstrBot 目录（如 ./AstrBot/astrbot）造成类型不一致
 try:
     _PLUGIN_DIR = Path(__file__).parent
     _VENDORED_ASTROBOT = _PLUGIN_DIR / "AstrBot" / "astrbot"
+    root_str = str(_PLUGIN_DIR.resolve())
+
+    # 情况A：如果 astrbot 还未导入，临时移除插件路径，优先导入宿主 AstrBot
     if _VENDORED_ASTROBOT.exists() and "astrbot" not in sys.modules:
         _orig_sys_path = list(sys.path)
         try:
-            root_str = str(_PLUGIN_DIR)
             sys.path = [p for p in sys.path if not (isinstance(p, str) and p.startswith(root_str))]
-            __import__("astrbot")  # 预先导入宿主 AstrBot
+            importlib.import_module("astrbot")
+        finally:
+            sys.path = _orig_sys_path
+
+    # 情况B：如果 astrbot 已导入但来源在插件路径下，强制改为宿主 AstrBot
+    ab = sys.modules.get("astrbot")
+    ab_file = getattr(ab, "__file__", "") if ab else ""
+    if ab_file and root_str in str(Path(ab_file).resolve()):
+        # 清理并从宿主路径重载
+        _orig_sys_path = list(sys.path)
+        try:
+            sys.modules.pop("astrbot", None)
+            importlib.invalidate_caches()
+            sys.path = [p for p in sys.path if not (isinstance(p, str) and p.startswith(root_str))]
+            importlib.import_module("astrbot")
         finally:
             sys.path = _orig_sys_path
 except Exception:
@@ -37,6 +54,13 @@ from .emotion.infer import EMOTIONS
 from .emotion.classifier import HeuristicClassifier  # LLMClassifier 不再使用
 from .tts.provider_siliconflow import SiliconFlowTTS
 from .utils.audio import ensure_dir, cleanup_dir
+
+# 记录 astrbot 实际来源，便于远端排查“导入到插件内自带 AstrBot”的问题
+try:
+    import astrbot as _ab_mod  # type: ignore
+    logging.info("TTSEmotionRouter: using astrbot from %s", getattr(_ab_mod, "__file__", None))
+except Exception:
+    pass
 
 CONFIG_FILE = Path(__file__).parent / "config.json"  # 旧版本地文件，作为迁移来源
 TEMP_DIR = Path(__file__).parent / "temp"
