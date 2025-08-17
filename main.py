@@ -677,8 +677,36 @@ class TTSEmotionRouter(Star):
         mode = "黑名单(默认开)" if self.global_enable else "白名单(默认关)"
         enabled = self._is_session_enabled(sid)
         yield event.plain_result(
-            f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s"
+            f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s, allow_mixed={self.allow_mixed}"
         )
+
+    @filter.command("tts_mixed_on", priority=1)
+    async def tts_mixed_on(self, event: AstrMessageEvent):
+        """允许混合输出（文本+语音都保留）"""
+        self.allow_mixed = True
+        try:
+            if self.config is not None and (
+                isinstance(self.config, AstrBotConfig) or isinstance(self.config, dict)
+            ):
+                self.config["allow_mixed"] = True
+                self._save_config()
+        except Exception:
+            pass
+        yield event.plain_result("TTS混合输出：开启（文本+语音）")
+
+    @filter.command("tts_mixed_off", priority=1)
+    async def tts_mixed_off(self, event: AstrMessageEvent):
+        """仅纯文本可参与合成；含图片/回复等时跳过"""
+        self.allow_mixed = False
+        try:
+            if self.config is not None and (
+                isinstance(self.config, AstrBotConfig) or isinstance(self.config, dict)
+            ):
+                self.config["allow_mixed"] = False
+                self._save_config()
+        except Exception:
+            pass
+        yield event.plain_result("TTS混合输出：关闭（仅纯文本时尝试合成）")
 
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
     # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
@@ -740,11 +768,13 @@ class TTSEmotionRouter(Star):
             pass
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
+            logging.info("TTS skip: session disabled (%s)", sid)
             return
 
         # 结果链
         result = event.get_result()
         if not result or not result.chain:
+            logging.debug("TTS skip: empty result chain")
             return
 
         # 防线0：若结果链已经是本插件生成的单个 Record（通常意味着前一次 Respond 已发送），
@@ -800,6 +830,7 @@ class TTSEmotionRouter(Star):
 
         # 是否允许混合
         if not self.allow_mixed and any(not isinstance(c, Plain) for c in result.chain):
+            logging.info("TTS skip: mixed content not allowed (allow_mixed=%s)", self.allow_mixed)
             return
 
         # 拼接纯文本
@@ -809,6 +840,7 @@ class TTSEmotionRouter(Star):
             if isinstance(c, Plain) and c.text.strip()
         ]
         if not text_parts:
+            logging.debug("TTS skip: no plain text parts after cleaning")
             return
         text = " ".join(text_parts)
 
@@ -821,6 +853,7 @@ class TTSEmotionRouter(Star):
         if re.search(
             r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I
         ):
+            logging.info("TTS skip: detected link/attachment tokens")
             return
 
         # 事件级签名去重（应对流水线二次触发/并发触发）
@@ -853,14 +886,17 @@ class TTSEmotionRouter(Star):
         st = self._session_state.setdefault(sid, SessionState())
         now = time.time()
         if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
+            logging.info("TTS skip: cooldown active (%.2fs < %ss)", now - st.last_ts, self.cooldown)
             return
 
         # 长度限制
         if self.text_limit > 0 and len(text) > self.text_limit:
+            logging.info("TTS skip: over text_limit (len=%d > limit=%d)", len(text), self.text_limit)
             return
 
         # 随机概率
         if random.random() > self.prob:
+            logging.info("TTS skip: probability gate (prob=%.2f)", self.prob)
             return
 
         # 情绪选择：优先使用隐藏标记 -> 启发式
