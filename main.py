@@ -655,7 +655,7 @@ class TTSEmotionRouter(Star):
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
     # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
     if hasattr(filter, "after_message_sent"):
-        @filter.after_message_sent()
+        @filter.after_message_sent(priority=-10000)
         async def after_message_sent(self, event: AstrMessageEvent):
             try:
                 result = event.get_result()
@@ -676,7 +676,7 @@ class TTSEmotionRouter(Star):
             except Exception:
                 pass
     elif hasattr(filter, "on_after_message_sent"):
-        @filter.on_after_message_sent()
+        @filter.on_after_message_sent(priority=-10000)
         async def after_message_sent(self, event: AstrMessageEvent):
             try:
                 result = event.get_result()
@@ -701,7 +701,7 @@ class TTSEmotionRouter(Star):
             return
 
     # ---------------- Core hook -----------------
-    @filter.on_decorating_result()
+    @filter.on_decorating_result(priority=-10000)
     async def on_decorating_result(self, event: AstrMessageEvent):
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
@@ -712,7 +712,8 @@ class TTSEmotionRouter(Star):
         if not result or not result.chain:
             return
 
-        # 防线0：若结果链已经是本插件生成的单个 Record（通常意味着前一次已完成），直接终止传播以避免重复发送
+        # 防线0：若结果链已经是本插件生成的单个 Record（通常意味着前一次 Respond 已发送），
+        # 直接清空链并终止传播，避免 RespondStage 在本次/后续轮次再次发送。
         try:
             if len(result.chain) == 1 and isinstance(result.chain[0], Record):
                 rec = result.chain[0]
@@ -721,7 +722,12 @@ class TTSEmotionRouter(Star):
                     fpath = Path(f)
                     # 仅当文件位于本插件 temp 目录下时判定为本插件产物
                     if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
-                        logging.info("skip duplicate event: detected existing Record from TTS, stop propagation")
+                        # 清空，确保 RespondStage 不会再次发送该 Record
+                        result.chain = []
+                        logging.info(
+                            "skip duplicate event: cleared existing TTS Record(%s) to prevent re-send",
+                            fpath.name,
+                        )
                         event.stop_event()
                         return
         except Exception:
