@@ -13,38 +13,102 @@ from pathlib import Path
 import importlib
 from typing import Dict, List, Optional
 
-# 优先使用宿主 AstrBot，避免插件内自带的 AstrBot 目录（如 ./AstrBot/astrbot）造成类型不一致
-try:
+def _ensure_compatible_astrbot():
+    """确保 astrbot API 兼容；若宿主 astrbot 不满足需要，则回退到插件自带的 AstrBot。"""
     _PLUGIN_DIR = Path(__file__).parent
-    _VENDORED_ASTROBOT = _PLUGIN_DIR / "AstrBot" / "astrbot"
+    _VENDORED_ROOT = _PLUGIN_DIR / "AstrBot"
+    _VENDORED_ASTROBOT = _VENDORED_ROOT / "astrbot"
     root_str = str(_PLUGIN_DIR.resolve())
 
-    # 情况A：如果 astrbot 还未导入，临时移除插件路径，优先导入宿主 AstrBot
-    if _VENDORED_ASTROBOT.exists() and "astrbot" not in sys.modules:
-        _orig_sys_path = list(sys.path)
-        try:
-            sys.path = [p for p in sys.path if not (isinstance(p, str) and p.startswith(root_str))]
-            importlib.import_module("astrbot")
-        finally:
-            sys.path = _orig_sys_path
+    def _import_host_first():
+        if _VENDORED_ASTROBOT.exists() and "astrbot" not in sys.modules:
+            _orig = list(sys.path)
+            try:
+                # 临时移除插件路径，优先导入宿主 AstrBot
+                sys.path = [p for p in sys.path if not (isinstance(p, str) and p.startswith(root_str))]
+                importlib.import_module("astrbot")
+            finally:
+                sys.path = _orig
 
-    # 情况B：如果 astrbot 已导入但来源在插件路径下，强制改为宿主 AstrBot
-    ab = sys.modules.get("astrbot")
-    ab_file = getattr(ab, "__file__", "") if ab else ""
-    if ab_file and root_str in str(Path(ab_file).resolve()):
-        # 清理并从宿主路径重载
-        _orig_sys_path = list(sys.path)
+    def _is_compatible() -> bool:
+        try:
+            import importlib as _il
+            _il.import_module("astrbot.api.event.filter")
+            _il.import_module("astrbot.core.platform")
+            return True
+        except Exception:
+            return False
+
+    def _force_vendored():
         try:
             sys.modules.pop("astrbot", None)
             importlib.invalidate_caches()
-            sys.path = [p for p in sys.path if not (isinstance(p, str) and p.startswith(root_str))]
+            # 确保优先搜索插件自带 AstrBot
+            if str(_VENDORED_ROOT) not in sys.path:
+                sys.path.insert(0, str(_VENDORED_ROOT))
             importlib.import_module("astrbot")
-        finally:
-            sys.path = _orig_sys_path
+            logging.info("TTSEmotionRouter: forced to vendored AstrBot: %s", (_VENDORED_ASTROBOT / "__init__.py").as_posix())
+        except Exception:
+            pass
+
+    # 1) 优先尝试宿主
+    try:
+        _import_host_first()
+    except Exception:
+        pass
+    # 2) 若不兼容，则强制改用内置 AstrBot
+    if not _is_compatible() and _VENDORED_ASTROBOT.exists():
+        _force_vendored()
+
+try:
+    _ensure_compatible_astrbot()
 except Exception:
     pass
 
-from astrbot.api.event import filter, AstrMessageEvent
+# 兼容不同 AstrBot 版本的导入：event 可能是模块(event.py)也可能是包(event/)
+try:
+    # 优先常规路径
+    from astrbot.api.event import AstrMessageEvent  # type: ignore
+except Exception:  # pragma: no cover - 旧版本回退
+    from astrbot.core.platform import AstrMessageEvent  # type: ignore
+
+# 统一获取 filter 装饰器集合：
+try:
+    # 新版通常支持 from astrbot.api.event import filter
+    from astrbot.api.event import filter as filter  # type: ignore
+except Exception:
+    try:
+        # 另一些版本可 import 子模块
+        import importlib as _importlib
+        filter = _importlib.import_module("astrbot.api.event.filter")  # type: ignore
+    except Exception:
+        # 最后回退：用 register 构造一个拥有同名方法的轻量代理
+        try:
+            import astrbot.core.star.register as _reg  # type: ignore
+
+            class _FilterCompat:
+                def command(self, *a, **k):
+                    return _reg.register_command(*a, **k)
+
+                def on_llm_request(self, *a, **k):
+                    return _reg.register_on_llm_request(*a, **k)
+
+                def on_llm_response(self, *a, **k):
+                    return _reg.register_on_llm_response(*a, **k)
+
+                def on_decorating_result(self, *a, **k):
+                    return _reg.register_on_decorating_result(*a, **k)
+
+                def after_message_sent(self, *a, **k):
+                    return _reg.register_after_message_sent(*a, **k)
+
+                # 兼容某些版本名为 on_after_message_sent
+                def on_after_message_sent(self, *a, **k):
+                    return _reg.register_after_message_sent(*a, **k)
+
+            filter = _FilterCompat()  # type: ignore
+        except Exception as _e:  # 若三种方式均失败，抛出原错误
+            raise _e
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Record, Plain
 from astrbot.core.config.astrbot_config import AstrBotConfig
@@ -466,13 +530,36 @@ class TTSEmotionRouter(Star):
                 "如你想到其它词，请映射到以上四类：happy(开心/喜悦/兴奋)、sad(伤心/难过/沮丧/upset)、"
                 "angry(生气/愤怒/恼火/furious)、neutral(平静/普通/困惑/confused)。"
             )
-            request.system_prompt = (request.system_prompt or "") + "\n" + instr
+            # 避免重复注入：仅当当前 system_prompt/prompt 中没有我们的标签时注入
+            sp = getattr(request, "system_prompt", "") or ""
+            pp = getattr(request, "prompt", "") or ""
+            marker_present = (self.emo_marker_tag in sp) or (self.emo_marker_tag in pp)
+            if not marker_present:
+                # 以更高优先级前置到 system_prompt 顶部
+                try:
+                    request.system_prompt = (instr + "\n" + sp).strip()
+                except Exception:
+                    pass
+                # 同时在 prompt 顶部再前置一次，兼容部分来源只读取 prompt 的实现
+                try:
+                    request.prompt = (instr + "\n\n" + pp).strip()
+                except Exception:
+                    pass
+                # 尝试向 contexts 注入一条 system 消息（弱依赖，失败忽略）
+                try:
+                    ctxs = getattr(request, "contexts", None)
+                    if isinstance(ctxs, list):
+                        # 插到最前，提升优先级
+                        ctxs.insert(0, {"role": "system", "content": instr})
+                        request.contexts = ctxs
+                except Exception:
+                    pass
             # 简要调试：记录上下文条数与本轮 prompt 长度，便于排查“上下文丢失”
             try:
                 ctxs = getattr(request, "contexts", None)
                 clen = len(ctxs) if isinstance(ctxs, list) else 0
                 plen = len(getattr(request, "prompt", "") or "")
-                logging.info(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
+                logging.info(f"TTSEmotionRouter.on_llm_request: injected={not marker_present}, contexts={clen}, prompt_len={plen}")
             except Exception:
                 pass
         except Exception:
@@ -1068,8 +1155,19 @@ class TTSEmotionRouter(Star):
             self._recent_sends[sig] = time.time()
 
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            # 按项目约定：最终仅保留语音 Record，避免重复发送；文本已通过历史兜底写入
-            result.chain = [Record(file=str(audio_path))]
+            # 先尝试直接入库历史；若失败，则保留 Plain+Record 交给下游入库
+            history_ok = False
+            try:
+                history_ok = await self._append_assistant_text_to_history(event, text) or False
+            except Exception:
+                history_ok = False
+            # 根据入库结果决定链形态
+            if history_ok:
+                # 已自行入库，按约定仅保留语音，避免重复发送
+                result.chain = [Record(file=str(audio_path))]
+            else:
+                # 历史未能直接写入，保留文本以便下游写入到上下文
+                result.chain = [Plain(text=text), Record(file=str(audio_path))]
             try:
                 event.continue_event()
             except Exception:
@@ -1083,11 +1181,6 @@ class TTSEmotionRouter(Star):
             try:
                 # 显式标记为 LLM 结果，便于其他插件在 after_message_sent 里入库
                 result.set_result_content_type(ResultContentType.LLM_RESULT)
-            except Exception:
-                pass
-            # 立即兜底：使用当前计算得到的文本写入会话历史，避免依赖 result.chain 的最终形态
-            try:
-                await self._append_assistant_text_to_history(event, text)
             except Exception:
                 pass
             # 明确声明不终止事件传播，避免被判定为 STOP 而绕过上下文入库路径
@@ -1141,10 +1234,10 @@ class TTSEmotionRouter(Star):
             # 容错：不因兜底写入失败影响主流程
             pass
 
-    async def _append_assistant_text_to_history(self, event: AstrMessageEvent, text: str) -> None:
-        """使用已清洗的最终文本，直接写入会话历史（去重且幂等）。"""
+    async def _append_assistant_text_to_history(self, event: AstrMessageEvent, text: str) -> bool:
+        """使用已清洗的最终文本，直接写入会话历史（去重且幂等）。返回是否成功写入。"""
         if not text:
-            return
+            return False
         try:
             cm = self.context.conversation_manager
             uid = event.unified_msg_origin
@@ -1161,12 +1254,12 @@ class TTSEmotionRouter(Star):
             # 若仍无法确定当前对话，放弃写入，避免误创建新会话导致上下文割裂
             if not cid:
                 logging.info("TTSEmotionRouter.history_fallback: skip write, no active conversation id")
-                return
+                return False
             # 仅当对话确实存在时才写入，避免 get_conversation 的 create_if_not_exists 分配新ID
             conv = await cm.get_conversation(uid, cid, create_if_not_exists=False)
             if not conv:
                 logging.info("TTSEmotionRouter.history_fallback: skip write, conversation not found for cid=%s", cid)
-                return
+                return False
             import json as _json
             msgs = []
             try:
@@ -1178,10 +1271,11 @@ class TTSEmotionRouter(Star):
             if msgs:
                 last = msgs[-1]
                 if isinstance(last, dict) and last.get("role") == "assistant" and (last.get("content") or "").strip() == text.strip():
-                    return
+                    return True
 
             msgs.append({"role": "assistant", "content": text.strip()})
             await cm.update_conversation(uid, cid, history=msgs)
             logging.info("TTSEmotionRouter.history_fallback: appended assistant text to conversation history")
+            return True
         except Exception:
-            pass
+            return False
