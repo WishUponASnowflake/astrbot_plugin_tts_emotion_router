@@ -652,6 +652,25 @@ class TTSEmotionRouter(Star):
             f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s"
         )
 
+    # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
+    @filter.on_after_message_sent()
+    async def after_message_sent(self, event: AstrMessageEvent):
+        try:
+            result = event.get_result()
+            if not result or not getattr(result, "chain", None):
+                return
+            if len(result.chain) == 1 and isinstance(result.chain[0], Record):
+                rec = result.chain[0]
+                f = getattr(rec, "file", "") or ""
+                if f:
+                    fpath = Path(f)
+                    if str(fpath).startswith(str((Path(__file__).parent / "temp").resolve())):
+                        # 该条消息我们已发送完成，清空链以阻止后续 RespondStage 重复发送
+                        result.chain = []
+                        logging.info("after_message_sent: cleared chain to prevent duplicate resend for %s", fpath.name)
+        except Exception:
+            pass
+
     # ---------------- Core hook -----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
