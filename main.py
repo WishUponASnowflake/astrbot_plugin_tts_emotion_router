@@ -641,6 +641,19 @@ class TTSEmotionRouter(Star):
         except Exception:
             pass
 
+        # 4) 立即尝试将清洗后的文本写入会话历史（幂等），避免后续阶段被误判 STOP 时丢上下文
+        try:
+            if cached_text and cached_text.strip():
+                ok = await self._append_assistant_text_to_history(event, cached_text.strip())
+                # 若此刻会话尚未建立，延迟一次重试
+                if not ok:
+                    try:
+                        asyncio.create_task(self._delayed_history_write(event, cached_text.strip(), delay=0.8))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     # ---------------- Commands -----------------
     @filter.command("tts_marker_on", priority=1)
     async def tts_marker_on(self, event: AstrMessageEvent):
@@ -970,14 +983,14 @@ class TTSEmotionRouter(Star):
             logging.info("TTSEmotionRouter.on_decorating_result: entry is_stopped=%s", event.is_stopped())
         except Exception:
             pass
-    # 尽量不改动结果对象，避免被其他阶段误判；仅声明继续传播
-        # 若进入本阶段已为 STOP，记录并主动切回 CONTINUE，避免被判定“终止传播”
+        # 若进入本阶段已为 STOP，主动切回 CONTINUE
         try:
             if event.is_stopped():
                 logging.info("TTSEmotionRouter.on_decorating_result: detected STOP at entry, forcing CONTINUE for decorating")
                 event.continue_event()
         except Exception:
             pass
+
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
             logging.info("TTS skip: session disabled (%s)", sid)
@@ -997,16 +1010,8 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-    # 不再在此处清空单个 Record 的链，改为在后续统一移除“本插件生成的 Record”，以保留文本给历史保存。
-
-        # 在最终输出层面，仅对首个 Plain 的开头执行一次剥离，确保不会把“emo”读出来
-        do_synth = True
+        # 清理首个 Plain 的隐藏情绪头
         try:
-            # 如链中已有本插件生成的语音，则本轮仅保留现状，不再二次合成，避免重复音频
-            if any(self._is_our_record(c) for c in result.chain):
-                logging.info("skip duplicate event: chain already contains our TTS Record, skip synth")
-                do_synth = False
-
             new_chain = []
             cleaned_once = False
             for comp in result.chain:
@@ -1015,8 +1020,7 @@ class TTSEmotionRouter(Star):
                     and isinstance(comp, Plain)
                     and getattr(comp, "text", None)
                 ):
-                    t0 = comp.text
-                    t0 = self._normalize_text(t0)
+                    t0 = self._normalize_text(comp.text)
                     t, _ = self._strip_emo_head_many(t0)
                     if t:
                         new_chain.append(Plain(text=t))
@@ -1036,7 +1040,7 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-    # 拼接纯文本
+        # 拼接纯文本
         text_parts = [
             c.text.strip()
             for c in result.chain
@@ -1057,9 +1061,7 @@ class TTSEmotionRouter(Star):
         text, _ = self._strip_emo_head_many(text)
 
         # 过滤链接/文件等提示性内容，避免朗读
-        if re.search(
-            r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I
-        ):
+        if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I):
             logging.info("TTS skip: detected link/attachment tokens")
             try:
                 event.continue_event()
@@ -1067,31 +1069,7 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-    # 事件级签名去重（应对流水线二次触发/并发触发）
-        try:
-            md5 = hashlib.md5(text.encode("utf-8")).hexdigest()
-            sig = f"{sid}|{md5}"
-        except Exception:
-            sig = f"{sid}|{len(text)}"
-        now = time.time()
-        # 清理过期项（懒清理）
-        try:
-            if len(self._recent_sends) > 1024:
-                cutoff = now - 60.0
-                self._recent_sends = {k: t for k, t in self._recent_sends.items() if t >= cutoff}
-        except Exception:
-            pass
-        # 并发中的同签名，直接阻断
-        if sig in self._inflight_sigs:
-            logging.info("skip duplicate event: inflight sig=%s (no-op, keep existing chain)", sig)
-            do_synth = False
-        # 短时间内重复同签名，直接阻断
-        last = self._recent_sends.get(sig)
-        if last and (now - last) < 8.0:
-            logging.info("skip duplicate event: recent sig=%s, dt=%.2fs (no-op)", sig, now - last)
-            do_synth = False
-
-        # 随机/冷却/长度
+        # 去重逻辑已移除：总是继续尝试合成
         st = self._session_state.setdefault(sid, SessionState())
         now = time.time()
         if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
@@ -1102,7 +1080,6 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-        # 长度限制
         if self.text_limit > 0 and len(text) > self.text_limit:
             logging.info("TTS skip: over text_limit (len=%d > limit=%d)", len(text), self.text_limit)
             try:
@@ -1111,7 +1088,6 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-        # 随机概率
         if random.random() > self.prob:
             logging.info("TTS skip: probability gate (prob=%.2f)", self.prob)
             try:
@@ -1128,7 +1104,6 @@ class TTSEmotionRouter(Star):
         else:
             emotion = self.heuristic_cls.classify(text, context=None)
             src = "heuristic"
-            # 中性偏置：若文本无明显情绪关键词，则强制使用 neutral
             try:
                 kw = getattr(self, "_emo_kw", {})
                 has_kw = any(p.search(text) for p in kw.values())
@@ -1146,7 +1121,6 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-        # 依据情绪选择语速（未配置则为 None -> 使用默认）
         speed_override = None
         try:
             if isinstance(self.speed_map, dict):
@@ -1163,44 +1137,21 @@ class TTSEmotionRouter(Star):
             emotion,
             src,
             vkey,
-            (voice[:40] + "...")
-            if isinstance(voice, str) and len(voice) > 43
-            else voice,
-            speed_override
-            if speed_override is not None
-            else getattr(self.tts, "speed", None),
+            (voice[:40] + "...") if isinstance(voice, str) and len(voice) > 43 else voice,
+            speed_override if speed_override is not None else getattr(self.tts, "speed", None),
         )
-        logging.debug(
-            "TTS input head(before/after): %r -> %r", orig_text[:60], text[:60]
-        )
+        logging.debug("TTS input head(before/after): %r -> %r", orig_text[:60], text[:60])
 
         out_dir = TEMP_DIR / sid
         ensure_dir(out_dir)
-        
-        # TTS内容去重：检查相同文本的重复生成（8秒内）
-        now = time.time()
-        if (st.last_tts_content == text and 
-            (now - st.last_tts_time) < 8.0):
-            logging.info(f"TTS: 跳过重复内容(no-op)，间隔={now - st.last_tts_time:.2f}s, text={text[:30]}...")
-            do_synth = False
-        
+
         # 最后一重防线：若 TTS 前文本仍以 emo/token 开头，强制清理
         try:
-            if text and (
-                text.lower().lstrip().startswith("emo")
-                or text.lstrip().startswith(("[", "【", "("))
-            ):
+            if text and (text.lower().lstrip().startswith("emo") or text.lstrip().startswith(("[", "【", "("))):
                 text, _ = self._strip_emo_head_many(text)
         except Exception:
             pass
-        if not do_synth:
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
-        # 进入并发保护区
-        self._inflight_sigs.add(sig)
+
         try:
             audio_path = self.tts.synth(text, voice, out_dir, speed=speed_override)
             if not audio_path:
@@ -1211,23 +1162,19 @@ class TTSEmotionRouter(Star):
                     pass
                 return
 
-            # 更新去重状态
             st.last_tts_content = text
-            st.last_tts_time = now
+            st.last_tts_time = time.time()
             st.last_ts = time.time()
-            self._recent_sends[sig] = time.time()
 
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            # 统一保留 Plain+Record，让核心流水线负责入库；同时尝试直接幂等写库，双保险。
             result.chain = [Plain(text=text), Record(file=str(audio_path))]
-            # 不显式修改事件结果类型，避免和其他插件交互产生误判
             try:
                 _hp = any(isinstance(c, Plain) for c in result.chain)
                 _hr = any(isinstance(c, Record) for c in result.chain)
                 logging.info("TTS finalize: keep Plain+Record (has_plain=%s, has_record=%s), text_len=%d", _hp, _hr, len(text))
             except Exception:
                 pass
-            # 直写历史（幂等），即便后续插件移除了 Plain 也不丢文本
+
             try:
                 _ = await self._append_assistant_text_to_history(event, text)
             except Exception:
@@ -1236,33 +1183,25 @@ class TTSEmotionRouter(Star):
                 event.continue_event()
             except Exception:
                 pass
-            # 缓存本轮可读文本
             try:
                 st.last_assistant_text = text.strip()
                 st.last_assistant_text_time = time.time()
             except Exception:
                 pass
             try:
-                # 显式标记为 LLM 结果，便于其他插件在 after_message_sent 里入库
                 result.set_result_content_type(ResultContentType.LLM_RESULT)
             except Exception:
                 pass
-            # 明确声明不终止事件传播，避免被判定为 STOP 而绕过上下文入库路径
             try:
                 event.continue_event()
             except Exception:
                 pass
-            # 不再调用 stop_event，避免打断 LLMRequestSubStage 的历史写入；
-            # RespondStage 会负责发送并在末尾 clear_result。
             return
         finally:
-            # 退出前再次声明继续传播，防止被判定为 STOP
             try:
                 event.continue_event()
             except Exception:
                 pass
-            self._inflight_sigs.discard(sig)
-        # 兜底：函数出口再次声明继续传播（不改 result 对象）
         try:
             logging.info("TTSEmotionRouter.on_decorating_result: exit is_stopped=%s", event.is_stopped())
             event.continue_event()
@@ -1367,3 +1306,11 @@ class TTSEmotionRouter(Star):
             return True
         except Exception:
             return False
+
+    async def _delayed_history_write(self, event: AstrMessageEvent, text: str, delay: float = 0.8):
+        """延迟写入一次会话历史，避免 on_llm_response 时会话尚未建立导致的落库失败。"""
+        try:
+            await asyncio.sleep(max(0.0, float(delay)))
+            await self._append_assistant_text_to_history(event, text)
+        except Exception:
+            pass
