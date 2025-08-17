@@ -78,7 +78,7 @@ class SessionState:
     "astrabot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.1.0",
+    "0.1.1",
 )
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
