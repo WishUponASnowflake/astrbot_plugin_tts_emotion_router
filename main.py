@@ -924,7 +924,8 @@ class TTSEmotionRouter(Star):
             self._recent_sends[sig] = time.time()
 
             logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            result.chain = [Record(file=str(audio_path))]
+            # 保留文本和语音，保证上下游插件和上下文不丢失
+            result.chain = [Plain(text=text), Record(file=str(audio_path))]
             event.stop_event()  # 关键：TTS合成后立即终止事件传播，防止重复
             return
         finally:
