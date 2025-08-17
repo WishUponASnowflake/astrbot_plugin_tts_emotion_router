@@ -449,7 +449,7 @@ class TTSEmotionRouter(Star):
                 ctxs = getattr(request, "contexts", None)
                 clen = len(ctxs) if isinstance(ctxs, list) else 0
                 plen = len(getattr(request, "prompt", "") or "")
-                logging.debug(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
+                logging.info(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
             except Exception:
                 pass
             return
@@ -469,7 +469,7 @@ class TTSEmotionRouter(Star):
                 ctxs = getattr(request, "contexts", None)
                 clen = len(ctxs) if isinstance(ctxs, list) else 0
                 plen = len(getattr(request, "prompt", "") or "")
-                logging.debug(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
+                logging.info(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
             except Exception:
                 pass
         except Exception:
@@ -731,6 +731,13 @@ class TTSEmotionRouter(Star):
     # ---------------- Core hook -----------------
     @filter.on_decorating_result(priority=10000)
     async def on_decorating_result(self, event: AstrMessageEvent):
+        # 若进入本阶段已为 STOP，记录并主动切回 CONTINUE，避免被判定“终止传播”
+        try:
+            if event.is_stopped():
+                logging.info("TTSEmotionRouter.on_decorating_result: detected STOP at entry, forcing CONTINUE for decorating")
+                event.continue_event()
+        except Exception:
+            pass
         sid = self._sess_id(event)
         if not self._is_session_enabled(sid):
             return
