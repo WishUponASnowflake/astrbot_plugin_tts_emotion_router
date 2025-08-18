@@ -1,6 +1,7 @@
 # astrabot_plugin_tts_emotion_router
 
-按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，其他OpenAI语音接口api同样适配）。可配合STT插件：https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin 实现和Bot全语音对话
+按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，其他OpenAI语音接口api同样适配）。
+可配合STT插件：https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin 实现和Bot全语音对话
 
 ## 功能特性
 - 将 LLM 文本回复按概率/长度/冷却等门控转换为语音（Record），失败回退文本。
