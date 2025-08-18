@@ -12,7 +12,6 @@
 - 过滤与门控：文本长度、混合内容开关、链接/文件提示过滤、触发概率与冷却；
 - 硅基流动 TTS：POST `{api.url}/audio/speech`，带重试与缓存；音频落地到 `data/plugins/tts_emotion_router/temp/<sid>/`。
 
-> 说明：原名 TTSEmotionRouter，已按约定更名为 `astrabot_plugin_tts_emotion_router`。
 
 ## 安装
 1. 将本目录放入 `data/plugins/tts_emotion_router/`。
@@ -45,6 +44,7 @@
   - “请在每次回复末尾追加形如 `[EMO:<happy|sad|angry|neutral>]` 的隐藏标记。该标记仅供系统解析，不会展示给用户。”
 - 开启 `emotion.marker.enable`；填写 `voice_map` 与 `speed_map`；保存并重载插件。
 - 发送短句测试不同情绪，验证音色/语速切换。
+- 可配合STT插件：https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin 实现和Bot全语音对话
 
 ## 硅基流动一键上传音色工具
 不会上传硅基cosyvoice音色？直接到 [Releases](https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router/releases/tag/v0.1.1) 页面下载 exe 附件，双击即可用！
