@@ -1,6 +1,6 @@
 # astrabot_plugin_tts_emotion_router
 
-按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，其他OpenAI语音接口api同样适配）。
+按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，其他OpenAI语音接口api同样适配）。可配合STT插件：https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin 实现和Bot全语音对话
 
 ## 功能特性
 - 将 LLM 文本回复按概率/长度/冷却等门控转换为语音（Record），失败回退文本。
@@ -44,7 +44,6 @@
   - “请在每次回复末尾追加形如 `[EMO:<happy|sad|angry|neutral>]` 的隐藏标记。该标记仅供系统解析，不会展示给用户。”
 - 开启 `emotion.marker.enable`；填写 `voice_map` 与 `speed_map`；保存并重载插件。
 - 发送短句测试不同情绪，验证音色/语速切换。
-- 可配合STT插件：https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin 实现和Bot全语音对话
 
 ## 硅基流动一键上传音色工具
 不会上传硅基cosyvoice音色？直接到 [Releases](https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router/releases/tag/v0.1.1) 页面下载 exe 附件，双击即可用！
