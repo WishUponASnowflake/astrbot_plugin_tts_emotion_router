@@ -36,6 +36,56 @@ class SiliconFlowTTS:
         ct = r.headers.get("Content-Type", "").lower()
         return ct.startswith("audio/") or ct.startswith("application/octet-stream")
 
+    def _validate_generated_file(self, file_path: Path) -> bool:
+        """验证生成的音频文件是否有效"""
+        try:
+            if not file_path.exists():
+                logging.error(f"SiliconFlowTTS: 文件不存在: {file_path}")
+                return False
+            
+            file_size = file_path.stat().st_size
+            if file_size == 0:
+                logging.error(f"SiliconFlowTTS: 文件为空: {file_path}")
+                return False
+            
+            if file_size < 100:  # 小于100字节通常是无效的音频文件
+                logging.error(f"SiliconFlowTTS: 文件太小({file_size}字节): {file_path}")
+                return False
+            
+            # 检查文件头部是否符合音频格式
+            try:
+                with open(file_path, "rb") as f:
+                    header = f.read(12)
+                
+                # 检查常见音频格式的文件头
+                if self.format.lower() == "mp3":
+                    # MP3文件应该以ID3标签或者MPEG帧同步字开始
+                    if header.startswith(b"ID3") or header.startswith(b"\xff\xfb") or header.startswith(b"\xff\xfa"):
+                        return True
+                    # 也可能直接是MPEG帧
+                    if len(header) >= 2 and header[0] == 0xff and (header[1] & 0xe0) == 0xe0:
+                        return True
+                elif self.format.lower() == "wav":
+                    # WAV文件应该以RIFF开始，后跟WAVE
+                    if header.startswith(b"RIFF") and b"WAVE" in header:
+                        return True
+                elif self.format.lower() == "opus":
+                    # Opus文件通常在OGG容器中
+                    if header.startswith(b"OggS"):
+                        return True
+                
+                # 如果格式检查失败，但文件大小合理，给出警告但允许通过
+                logging.warning(f"SiliconFlowTTS: 文件格式验证失败，但继续使用: {file_path}")
+                return True
+                
+            except Exception as e:
+                logging.warning(f"SiliconFlowTTS: 文件头验证异常: {e}")
+                return True  # 验证异常时允许通过
+            
+        except Exception as e:
+            logging.error(f"SiliconFlowTTS: 文件验证失败: {e}")
+            return False
+
     def synth(
         self, text: str, voice: str, out_dir: Path, speed: Optional[float] = None
     ) -> Optional[Path]:
@@ -103,8 +153,18 @@ class SiliconFlowTTS:
                         )
                         last_err = err
                         break
+                    
+                    # 写入文件
                     with open(out_path, "wb") as f:
                         f.write(r.content)
+                    
+                    # 验证生成的文件
+                    if not self._validate_generated_file(out_path):
+                        logging.error(f"SiliconFlowTTS: 生成的文件验证失败: {out_path}")
+                        last_err = {"error": "Generated audio file validation failed"}
+                        break
+                    
+                    logging.info(f"SiliconFlowTTS: 成功生成音频文件: {out_path} ({out_path.stat().st_size}字节)")
                     return out_path
 
                 # 非 2xx
