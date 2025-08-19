@@ -1,5 +1,23 @@
-name: astrabot_plugin_tts_emotion_router
-author: 木有知
-version: 0.1.1
-desc: 按情绪路由到不同音色与语速的 TTS 插件（硅基流动 API，其他OpenAI语音接口api同样适配），支持隐藏标记与启发式情绪识别、概率/长度/冷却门控与会话开关。
-repo: https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router
+name: astrabot_plugin_tts_emotion_router_fixed # TTS情绪路由插件增强修复版
+desc: 按情绪路由到不同音色与语速的 TTS 插件（增强修复版），专门解决retcode=1200音频发送失败问题，支持隐藏标记与启发式情绪识别、概率/长度/冷却门控与会话开关。
+help: |
+        情绪TTS插件增强版 - 解决retcode=1200问题
+        
+        命令：
+        /tts_emotion_on - 开启当前会话的情绪TTS
+        /tts_emotion_off - 关闭当前会话的情绪TTS
+        /tts_emotion_status - 查看当前设置状态
+        /tts_emotion_debug - 获取调试信息
+        /tts_emotion_test <文本> - 测试音频生成
+        /tts_emotion_say <文本> - 手动语音合成
+        
+        特性：
+        - 双重情绪识别：隐藏标记 + 启发式分析
+        - 智能路由：不同情绪使用不同音色和语速
+        - 增强兼容性：解决Windows路径和QQ协议适配问题
+        - 多重验证：音频文件完整性检查和降级策略
+        
+        支持情绪：开心、愤怒、悲伤、惊讶、恐惧、厌恶、平静、兴奋
+version: v1.2.0-enhanced # 增强修复版本
+author: 木有知 (Enhanced by GitHub Copilot) # 原作者及增强信息
+repo: https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router # 插件的仓库地址
