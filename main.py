@@ -298,6 +298,97 @@ class TTSEmotionRouter(Star):
         except Exception:
             return False
 
+    def _validate_audio_file(self, audio_path: Path) -> bool:
+        """验证音频文件是否有效"""
+        try:
+            if not audio_path.exists():
+                logging.error(f"TTSEmotionRouter: 音频文件不存在: {audio_path}")
+                return False
+            
+            file_size = audio_path.stat().st_size
+            if file_size == 0:
+                logging.error(f"TTSEmotionRouter: 音频文件为空: {audio_path}")
+                return False
+            
+            if file_size < 100:  # 小于100字节通常是无效文件
+                logging.error(f"TTSEmotionRouter: 音频文件太小({file_size}字节): {audio_path}")
+                return False
+            
+            # 检查文件扩展名
+            if audio_path.suffix.lower() not in ['.mp3', '.wav', '.opus', '.pcm']:
+                logging.warning(f"TTSEmotionRouter: 音频文件格式可能不支持: {audio_path}")
+            
+            logging.info(f"TTSEmotionRouter: 音频文件验证通过: {audio_path} ({file_size}字节)")
+            return True
+        except Exception as e:
+            logging.error(f"TTSEmotionRouter: 音频文件验证失败: {audio_path}, 错误: {e}")
+            return False
+
+    def _normalize_audio_path(self, audio_path: Path) -> str:
+        """规范化音频文件路径以提高协议端兼容性"""
+        try:
+            # 1. 确保使用绝对路径
+            abs_path = audio_path.resolve()
+            
+            # 2. Windows路径格式转换
+            import os
+            normalized = os.path.normpath(str(abs_path))
+            
+            # 3. 对于某些协议端，可能需要使用正斜杠
+            if os.name == 'nt':  # Windows
+                # 先尝试使用反斜杠路径（标准Windows格式）
+                return normalized
+            else:
+                # Unix-like系统使用正斜杠
+                return normalized.replace('\\', '/')
+        except Exception as e:
+            logging.error(f"TTSEmotionRouter: 路径规范化失败: {audio_path}, 错误: {e}")
+            return str(audio_path)
+
+    def _create_fallback_text_result(self, text: str, event: AstrMessageEvent) -> None:
+        """创建文本回退结果"""
+        try:
+            result = event.get_result()
+            if result and hasattr(result, 'chain'):
+                # 清空现有链并添加文本结果
+                result.chain.clear()
+                result.chain.append(Plain(text))
+                logging.info(f"TTSEmotionRouter: 已回退到文本消息: {text[:50]}...")
+        except Exception as e:
+            logging.error(f"TTSEmotionRouter: 创建文本回退失败: {e}")
+
+    def _try_copy_to_accessible_location(self, audio_path: Path) -> Optional[Path]:
+        """尝试将音频文件复制到更容易访问的位置"""
+        try:
+            import tempfile
+            import shutil
+            
+            # 使用系统临时目录
+            temp_dir = Path(tempfile.gettempdir()) / "astrbot_audio"
+            temp_dir.mkdir(exist_ok=True)
+            
+            # 生成新的文件名
+            import uuid
+            new_filename = f"tts_{uuid.uuid4().hex[:8]}{audio_path.suffix}"
+            new_path = temp_dir / new_filename
+            
+            # 复制文件
+            shutil.copy2(audio_path, new_path)
+            
+            if self._validate_audio_file(new_path):
+                logging.info(f"TTSEmotionRouter: 音频文件已复制到: {new_path}")
+                return new_path
+            else:
+                # 清理失败的复制
+                try:
+                    new_path.unlink()
+                except:
+                    pass
+                return None
+        except Exception as e:
+            logging.error(f"TTSEmotionRouter: 复制音频文件失败: {e}")
+            return None
+
     # ---------------- Config helpers -----------------
     def _load_config(self, cfg: dict) -> dict:
         # 合并磁盘config与传入config，便于热更
@@ -778,6 +869,122 @@ class TTSEmotionRouter(Star):
         except Exception:
             yield event.plain_result("用法：tts_cooldown <非负整数(秒)>")
 
+    @filter.command("tts_test", priority=1)
+    async def tts_test(self, event: AstrMessageEvent, *, text: Optional[str] = None):
+        """测试TTS功能并诊断问题。用法：tts_test [测试文本]"""
+        if not text:
+            text = "你好，这是一个TTS测试"
+        
+        sid = self._sess_id(event)
+        if not self._is_session_enabled(sid):
+            yield event.plain_result("本会话TTS未启用，请使用 tts_on 启用")
+            return
+        
+        try:
+            # 选择默认情绪和音色
+            emotion = "neutral"
+            vkey, voice = self._pick_voice_for_emotion(emotion)
+            if not voice:
+                yield event.plain_result(f"错误：未配置音色映射，请先配置 voice_map.{emotion}")
+                return
+            
+            # 创建输出目录
+            out_dir = TEMP_DIR / sid
+            ensure_dir(out_dir)
+            
+            # 生成音频
+            yield event.plain_result(f"正在生成测试音频：\"{text}\"...")
+            
+            start_time = time.time()
+            audio_path = self.tts.synth(text, voice, out_dir, speed=None)
+            generation_time = time.time() - start_time
+            
+            if not audio_path:
+                yield event.plain_result("❌ TTS API调用失败")
+                return
+            
+            # 验证文件
+            if not self._validate_audio_file(audio_path):
+                yield event.plain_result(f"❌ 生成的音频文件无效: {audio_path}")
+                return
+            
+            # 路径规范化测试
+            normalized_path = self._normalize_audio_path(audio_path)
+            
+            # 尝试创建Record对象
+            try:
+                record = Record(file=normalized_path)
+                record_status = "✅ 成功"
+            except Exception as e:
+                record_status = f"❌ 失败: {e}"
+            
+            # 报告结果
+            file_size = audio_path.stat().st_size
+            result_msg = f"""🎵 TTS测试结果：
+✅ 音频生成成功
+📁 文件路径: {audio_path.name}
+📊 文件大小: {file_size} 字节
+⏱️ 生成耗时: {generation_time:.2f}秒
+🎯 使用音色: {vkey} ({voice[:30]}...)
+📝 Record对象: {record_status}
+🔧 规范化路径: {normalized_path == str(audio_path)}"""
+            
+            yield event.plain_result(result_msg)
+            
+            # 尝试发送音频
+            try:
+                yield event.record_result(str(audio_path))
+            except Exception as e:
+                yield event.plain_result(f"❌ 音频发送失败: {e}")
+            
+        except Exception as e:
+            yield event.plain_result(f"❌ TTS测试失败: {e}")
+            logging.error(f"TTS测试异常: {e}", exc_info=True)
+
+    @filter.command("tts_debug", priority=1)
+    async def tts_debug(self, event: AstrMessageEvent):
+        """显示TTS调试信息"""
+        try:
+            sid = self._sess_id(event)
+            st = self._session_state.get(sid, SessionState())
+            
+            # 系统信息
+            import platform
+            import os
+            
+            debug_info = f"""🔧 TTS调试信息：
+🖥️ 系统: {platform.system()} {platform.release()}
+📂 Python路径: {os.getcwd()}
+🆔 会话ID: {sid}
+⚡ 会话状态: {'✅ 启用' if self._is_session_enabled(sid) else '❌ 禁用'}
+🎛️ 全局开关: {'✅ 开启' if self.global_enable else '❌ 关闭'}
+🎲 触发概率: {self.prob}
+📏 文字限制: {self.text_limit}
+⏰ 冷却时间: {self.cooldown}s
+🔄 混合内容: {'✅ 允许' if self.allow_mixed else '❌ 禁止'}
+🎵 API模型: {self.tts.model}
+🎚️ 音量增益: {self.tts.gain}dB
+📁 临时目录: {TEMP_DIR}
+
+📊 会话统计:
+🕐 最后TTS时间: {time.strftime('%H:%M:%S', time.localtime(st.last_tts_time)) if st.last_tts_time else '无'}
+📝 最后TTS内容: {st.last_tts_content[:30] + '...' if st.last_tts_content and len(st.last_tts_content) > 30 else st.last_tts_content or '无'}
+😊 待用情绪: {st.pending_emotion or '无'}
+
+🎭 音色配置:"""
+            
+            for emotion in EMOTIONS:
+                vkey, voice = self._pick_voice_for_emotion(emotion)
+                speed = self.speed_map.get(emotion) if isinstance(self.speed_map, dict) else None
+                debug_info += f"\n{emotion}: {vkey if voice else '❌ 未配置'}"
+                if speed:
+                    debug_info += f" (语速: {speed})"
+            
+            yield event.plain_result(debug_info)
+            
+        except Exception as e:
+            yield event.plain_result(f"❌ 获取调试信息失败: {e}")
+
     @filter.command("tts_gain", priority=1)
     async def tts_gain(self, event: AstrMessageEvent, *, value: Optional[str] = None):
         """调节输出音量增益（单位dB，范围 -10 ~ 10）。示例：tts_gain 5"""
@@ -1158,20 +1365,91 @@ class TTSEmotionRouter(Star):
                     pass
                 return
 
-            st.last_tts_content = text
-            st.last_tts_time = time.time()
-            st.last_ts = time.time()
+            # === 专门针对retcode=1200问题的增强处理 ===
+            
+            # 1. 验证生成的音频文件
+            if not self._validate_audio_file(audio_path):
+                logging.error(f"TTS生成的音频文件无效: {audio_path}")
+                # 直接回退到文本，不发送无效音频
+                result.chain = [Plain(text=text)]
+                try:
+                    event.continue_event()
+                except Exception:
+                    pass
+                return
+            
+            # 2. 使用相对路径以提高兼容性
+            try:
+                # 计算相对于工作目录的路径
+                import os
+                work_dir = Path(os.getcwd())
+                try:
+                    relative_path = audio_path.relative_to(work_dir)
+                    audio_file_path = str(relative_path).replace('\\', '/')
+                    logging.info(f"TTS: 使用相对路径: {audio_file_path}")
+                except ValueError:
+                    # 如果无法计算相对路径，使用绝对路径
+                    audio_file_path = str(audio_path).replace('\\', '/')
+                    logging.info(f"TTS: 使用绝对路径: {audio_file_path}")
+            except Exception:
+                audio_file_path = str(audio_path)
+            
+            # 3. 创建Record对象前进行最后验证
+            try:
+                # 确保文件存在且可读
+                test_path = Path(audio_file_path) if not Path(audio_file_path).is_absolute() else audio_path
+                if not test_path.exists():
+                    raise FileNotFoundError(f"音频文件不存在: {test_path}")
+                
+                # 检查文件大小
+                file_size = test_path.stat().st_size
+                if file_size == 0:
+                    raise ValueError(f"音频文件为空: {test_path}")
+                
+                logging.info(f"TTS: 音频文件验证通过，大小={file_size}字节")
+                
+            except Exception as e:
+                logging.error(f"TTS: 音频文件验证失败: {e}")
+                # 验证失败时回退到纯文本
+                result.chain = [Plain(text=text)]
+                try:
+                    event.continue_event()
+                except Exception:
+                    pass
+                return
+            
+            # 4. 使用更保守的Record创建策略
+            try:
+                record = Record(file=audio_file_path)
+                logging.info(f"TTS: 成功创建Record对象，路径={audio_file_path}")
+                
+                # 更新会话状态
+                st.last_tts_content = text
+                st.last_tts_time = time.time()
+                st.last_ts = time.time()
 
-            logging.info(f"TTS: 成功生成音频，文件={audio_path.name}")
-            if self.allow_mixed:
-                result.chain = [Plain(text=text), Record(file=str(audio_path))]
-            else:
-                # 仅发送音频；文本已在 on_llm_response 入库，避免双重发送触发宿主重复播发
-                result.chain = [Record(file=str(audio_path))]
+                # 根据配置决定输出格式
+                if self.allow_mixed:
+                    result.chain = [Plain(text=text), record]
+                    logging.info("TTS: 输出混合内容（文本+音频）")
+                else:
+                    result.chain = [record]
+                    logging.info("TTS: 输出纯音频")
+                
+                # 记录成功信息
+                logging.info(f"TTS: 音频处理完成 - 文件={audio_path.name}, 大小={file_size}字节")
+                
+            except Exception as e:
+                logging.error(f"TTS: 创建Record失败: {e}")
+                # Record创建失败，强制回退到文本
+                result.chain = [Plain(text=text)]
+                logging.info("TTS: 已回退到纯文本输出")
+
+            # 5. 统一的后续处理
             try:
                 _hp = any(isinstance(c, Plain) for c in result.chain)
                 _hr = any(isinstance(c, Record) for c in result.chain)
-                logging.info("TTS finalize: keep Plain+Record (has_plain=%s, has_record=%s), text_len=%d", _hp, _hr, len(text))
+                logging.info("TTS finalize: has_plain=%s, has_record=%s, text_len=%d", _hp, _hr, len(text))
             except Exception:
                 pass
 
