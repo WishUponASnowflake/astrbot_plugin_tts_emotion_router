@@ -147,7 +147,7 @@ class SessionState:
 
 
 @register(
-    "astrabot_plugin_tts_emotion_router",
+    "astrbot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
     "0.1.1",
