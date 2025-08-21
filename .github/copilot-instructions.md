@@ -1,4 +1,4 @@
-# Copilot instructions for astrabot_plugin_tts_emotion_router
+# Copilot instructions for astrbot_plugin_tts_emotion_router
 
 本仓库是一个 AstrBot 插件：按情绪将 LLM 文本路由到不同音色/语速的 TTS，并在装饰阶段把文本替换为语音消息（Record）。本说明面向 AI 编码代理，帮助快速、安全地改动代码。
 
