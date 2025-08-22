@@ -14,6 +14,11 @@ import importlib
 from typing import Dict, List, Optional
 import asyncio
 
+try:
+    import emoji
+except ImportError:
+    emoji = None
+
 def _ensure_compatible_astrbot():
     """确保 astrbot API 兼容；若宿主 astrbot 不满足需要，则回退到插件自带的 AstrBot。"""
     _PLUGIN_DIR = Path(__file__).parent
@@ -456,6 +461,28 @@ class TTSEmotionRouter(Star):
         for ch in invisibles:
             text = text.replace(ch, "")
         return text
+    
+    def _filter_emojis_and_special_chars(self, text: str) -> str:
+        """过滤掉emoji表情符号和指定的特殊字符"""
+        if not text:
+            return text
+        
+        # 如果emoji库可用，使用它来过滤emoji
+        if emoji:
+            try:
+                # 移除所有emoji
+                text = emoji.replace_emoji(text, replace='')
+            except Exception as e:
+                logging.debug(f"TTSEmotionRouter: emoji过滤失败: {e}")
+        
+        # 过滤指定的特殊字符：$ % # * [] 以及其他常见符号
+        special_chars = r'[\$%#\*\[\]【】〖〗〔〕『』「」《》〈〉（）()｛｝{}、。，,；;：:！!？?""''\"\'`~@&^_+=|\\/<>·•…—–]'
+        text = re.sub(special_chars, '', text)
+        
+        # 移除多余的空白字符
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
 
     def _normalize_label(self, label: Optional[str]) -> Optional[str]:
         """将任意英文/中文情绪词映射到四选一。
@@ -894,6 +921,12 @@ class TTSEmotionRouter(Star):
             
             # 生成音频
             yield event.plain_result(f"正在生成测试音频：\"{text}\"...")
+            
+            # 在测试中也应用emoji过滤
+            filtered_text = self._filter_emojis_and_special_chars(text)
+            if filtered_text != text:
+                yield event.plain_result(f"过滤后文本：\"{filtered_text}\"")
+            text = filtered_text
             
             start_time = time.time()
             audio_path = self.tts.synth(text, voice, out_dir, speed=None)
@@ -1352,6 +1385,20 @@ class TTSEmotionRouter(Star):
                 text, _ = self._strip_emo_head_many(text)
         except Exception:
             pass
+
+        # 在TTS合成前过滤emoji和特殊字符
+        try:
+            text = self._filter_emojis_and_special_chars(text)
+            if not text.strip():  # 如果过滤后文本为空，跳过TTS
+                logging.info("TTS skip: text is empty after emoji/special char filtering")
+                try:
+                    event.continue_event()
+                except Exception:
+                    pass
+                return
+            logging.debug("TTS text after emoji filtering: %r", text[:60])
+        except Exception as e:
+            logging.warning("TTS emoji filtering failed: %s", e)
 
     # 不做生成级去重：重复发送问题通过结果链策略规避
 
