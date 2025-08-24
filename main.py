@@ -45,6 +45,7 @@ def _ensure_compatible_astrbot():
             sys.modules.pop("astrbot", None)
             importlib.invalidate_caches()
             # 确保优先搜索插件自带 AstrBot
+             # 确保优先搜索插件自带 AstrBot
             if str(_VENDORED_ROOT) not in sys.path:
                 sys.path.insert(0, str(_VENDORED_ROOT))
             importlib.import_module("astrbot")
