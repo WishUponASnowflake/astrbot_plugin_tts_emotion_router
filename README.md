@@ -96,6 +96,7 @@
 # 音色映射（必须至少配置 neutral）
 例：
   neutral: "FunAudioLLM/CosyVoice2-0.5B:anna"    # 中性音色
+  neutral: "speech:sad-zhizhi-voice:icwcmuszkb:vdpjnvpfqbqbsywmbyly"# 自定义音色从“speech”开始填
 
 # 语速映射（自己按喜欢整吧）
 speed_map:
@@ -126,6 +127,7 @@ emotion:
 
 ### 💡 推荐配置流程
 <img width="580" height="1368" alt="PixPin_2025-08-25_17-00-01" src="https://github.com/user-attachments/assets/6cd57fb9-9b39-4dae-80e4-c9bd0c3400de" />
+
 1. **配置系统提示**
    在你的 AI 人格设定中添加：
    ```
