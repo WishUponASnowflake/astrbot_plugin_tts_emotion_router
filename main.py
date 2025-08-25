@@ -151,7 +151,7 @@ class SessionState:
     "astrbot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.2.1",
+    "0.1.1",
 )
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -219,6 +219,8 @@ class TTSEmotionRouter(Star):
         self.text_limit: int = int(self.config.get("text_limit", 80))
         self.cooldown: int = int(self.config.get("cooldown", 20))
         self.allow_mixed: bool = bool(self.config.get("allow_mixed", False))
+        # 智能检测：自动识别并跳过代码内容，避免影响正常文本显示
+        self.smart_detection: bool = bool(self.config.get("smart_detection", True))  # 默认启用
         # 情绪分类：仅启发式 + 隐藏标记
         emo_cfg = self.config.get("emotion", {}) or {}
         self.heuristic_cls = HeuristicClassifier()
@@ -600,18 +602,102 @@ class TTSEmotionRouter(Star):
             return cleaned.strip(), None
         return text, None
 
+    def _is_command_input(self, event: AstrMessageEvent) -> bool:
+        """检测用户输入是否为命令，用于判断回复是否应跳过TTS"""
+        try:
+            # 获取用户消息内容
+            user_message = getattr(event, 'message_obj', None)
+            if not user_message or not hasattr(user_message, 'message_str'):
+                return False
+            
+            msg_content = getattr(user_message, 'message_str', '') or ''
+            if not msg_content:
+                return False
+            
+            msg_content = msg_content.strip().lower()
+            
+            # 1. 插件TTS相关命令
+            tts_commands = [
+                'tts_status', 'tts_on', 'tts_off', 'tts_global_on', 'tts_global_off',
+                'tts_prob', 'tts_limit', 'tts_cooldown', 'tts_test', 'tts_debug',
+                'tts_emote', 'tts_marker_on', 'tts_marker_off', 'tts_mixed_on',
+                'tts_mixed_off', 'tts_smart_on', 'tts_smart_off', 'tts_gain',
+                'tts_test_problematic'
+            ]
+            
+            for cmd in tts_commands:
+                if msg_content.startswith(cmd.lower()):
+                    return True
+            
+            # 2. 系统命令（以/或!开头）
+            if msg_content.startswith(('/help', '/status', '/config', '/set', '/get', '/version')):
+                return True
+            if msg_content.startswith(('!help', '!status', '!config', '!set', '!get', '!version')):
+                return True
+            
+            # 3. 常见设置命令模式
+            setting_patterns = [
+                '设置', '配置', 'config', 'setting', 'set ', 'get ',
+                '查看状态', '状态', 'status', '帮助', 'help'
+            ]
+            
+            for pattern in setting_patterns:
+                if msg_content.startswith(pattern):
+                    return True
+            
+            # 4. 插件管理命令
+            plugin_patterns = [
+                '插件', 'plugin', '启用', '禁用', 'enable', 'disable',
+                '安装', 'install', '卸载', 'uninstall'
+            ]
+            
+            for pattern in plugin_patterns:
+                if msg_content.startswith(pattern):
+                    return True
+            
+            return False
+            
+        except Exception:
+            # 出现异常时保守处理，不认为是命令
+            return False
+
+    def _build_emotion_instruction(self) -> str:
+        """构建非侵入性的情绪指令"""
+        tag = self.emo_marker_tag
+        return (
+            f"[可选] 如果合适，可在回复开头添加情绪标记：[{tag}:happy/sad/angry/neutral]之一。"
+            "这是可选的，如果内容不适合，可直接正常回复。此标记仅供系统参考。"
+        )
+
+    def _contains_code_content(self, text: str) -> bool:
+        """检测文本是否包含代码内容"""
+        if not text:
+            return False
+        
+        code_patterns = [
+            r'```[\s\S]*?```',              # 代码块
+            r'`[^`\n]{3,}`',                # 较长行内代码
+            r'https?://[^\s]+',             # URL链接
+            r'function\s+\w+\s*\(',         # 函数定义
+            r'class\s+\w+\s*[{:]',          # 类定义
+            r'import\s+[\w.,\s]+',          # import语句
+            r'{\s*"[\w":\s,\[\]{}]+}',      # JSON对象
+        ]
+        
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in code_patterns)
+
     def _filter_code_blocks(self, text: str) -> str:
-        """过滤markdown代码块和行内代码"""
+        """过滤markdown代码块和行内代码（仅替换为占位符，不删除内容）"""
         if not text:
             return text
         
-        # 过滤代码块 ```代码```
+        # 过滤代码块 ```代码```，替换为占位符而非删除
         text = re.sub(r'```[\s\S]*?```', '[代码块]', text)
         
-        # 过滤行内代码 `代码`
+        # 过滤行内代码 `代码`，替换为占位符而非删除
         text = re.sub(r'`[^`\n]+`', '[代码]', text)
         
-        # 过滤看起来像代码的内容（包含特殊符号组合）
+        # 对于其他代码特征，不再删除整个文本，而是标记但保留内容
         code_patterns = [
             r'\b\w+\(\s*\)',  # 函数调用 func()
             r'\b\w+\.\w+\(',   # 方法调用 obj.method(
@@ -619,10 +705,11 @@ class TTSEmotionRouter(Star):
             r'\w+://\S+',      # URLs
         ]
         
+        # 检测到代码特征时，保留原文但记录标记（供上层逻辑判断是否跳过TTS）
         for pattern in code_patterns:
             if re.search(pattern, text):
-                # 如果检测到代码特征，标记跳过TTS
-                return ""
+                logging.debug(f"_filter_code_blocks: detected code pattern {pattern}, preserving text")
+                break
         
         return text
 
@@ -754,63 +841,35 @@ class TTSEmotionRouter(Star):
         return text, last_label
 
     # ---------------- LLM 请求前：注入情绪标记指令 -----------------
-    @filter.on_llm_request()
+    @filter.on_llm_request(priority=1)  # 设置较高优先级
     async def on_llm_request(self, event: AstrMessageEvent, request):
-        """在系统提示中加入隐藏情绪标记指令，让 LLM 先输出 [EMO:xxx] 再回答。"""
+        """优化版LLM请求钩子，遵循AstrBot最佳实践"""
         if not self.emo_marker_enable:
-            # 简要调试：记录上下文条数与本轮 prompt 长度，便于排查“上下文丢失”
-            try:
-                ctxs = getattr(request, "contexts", None)
-                clen = len(ctxs) if isinstance(ctxs, list) else 0
-                plen = len(getattr(request, "prompt", "") or "")
-                logging.info(f"TTSEmotionRouter.on_llm_request: contexts={clen}, prompt_len={plen}")
-            except Exception:
-                pass
             return
+        
         try:
-            tag = self.emo_marker_tag
-            instr = (
-                f"请在每次回复的最开头只输出一个隐藏情绪标记，格式严格为："
-                f"[{tag}:happy] 或 [{tag}:sad] 或 [{tag}:angry] 或 [{tag}:neutral]。"
-                "必须四选一；若无法判断请选择 neutral。该标记仅供系统解析，"
-                "输出后立刻继续正常作答，不要解释或复述该标记。"
-                "如你想到其它词，请映射到以上四类：happy(开心/喜悦/兴奋)、sad(伤心/难过/沮丧/upset)、"
-                "angry(生气/愤怒/恼火/furious)、neutral(平静/普通/困惑/confused)。"
-            )
-            # 避免重复注入：仅当当前 system_prompt/prompt 中没有我们的标签时注入
-            sp = getattr(request, "system_prompt", "") or ""
-            pp = getattr(request, "prompt", "") or ""
-            marker_present = (self.emo_marker_tag in sp) or (self.emo_marker_tag in pp)
-            if not marker_present:
-                # 以更高优先级前置到 system_prompt 顶部
-                try:
-                    request.system_prompt = (instr + "\n" + sp).strip()
-                except Exception:
-                    pass
-                # 同时在 prompt 顶部再前置一次，兼容部分来源只读取 prompt 的实现
-                try:
-                    request.prompt = (instr + "\n\n" + pp).strip()
-                except Exception:
-                    pass
-                # 尝试向 contexts 注入一条 system 消息（弱依赖，失败忽略）
-                try:
-                    ctxs = getattr(request, "contexts", None)
-                    if isinstance(ctxs, list):
-                        # 插到最前，提升优先级
-                        ctxs.insert(0, {"role": "system", "content": instr})
-                        request.contexts = ctxs
-                except Exception:
-                    pass
-            # 简要调试：记录上下文条数与本轮 prompt 长度，便于排查“上下文丢失”
-            try:
-                ctxs = getattr(request, "contexts", None)
-                clen = len(ctxs) if isinstance(ctxs, list) else 0
-                plen = len(getattr(request, "prompt", "") or "")
-                logging.info(f"TTSEmotionRouter.on_llm_request: injected={not marker_present}, contexts={clen}, prompt_len={plen}")
-            except Exception:
-                pass
-        except Exception:
-            pass
+            # 基于官方文档：通常系统指令不会到达此钩子，但添加双重检查
+            user_message = getattr(event, 'message_obj', None)
+            if user_message and hasattr(user_message, 'message_str'):
+                msg_content = user_message.message_str
+                # 检测明显的系统指令模式
+                if msg_content.startswith(('/', '!', 'tts_', '设置', '配置')):
+                    logging.info("TTSEmotionRouter: 检测到疑似系统指令，跳过情绪标记")
+                    return
+            
+            # 检查是否已注入（避免重复）
+            current_prompt = getattr(request, "system_prompt", "") or ""
+            if self.emo_marker_tag in current_prompt:
+                return
+                
+            # 使用追加方式注入情绪指令（符合官方最佳实践）
+            emotion_instruction = self._build_emotion_instruction()
+            request.system_prompt = f"{current_prompt}\n\n{emotion_instruction}".strip()
+            
+            logging.info("TTSEmotionRouter: 已注入情绪标记指令")
+            
+        except Exception as e:
+            logging.warning(f"TTSEmotionRouter.on_llm_request: {e}")
 
     # ---------------- LLM 标记解析（避免标签外显） -----------------
     @filter.on_llm_response(priority=1)
@@ -1237,7 +1296,7 @@ class TTSEmotionRouter(Star):
         mode = "黑名单(默认开)" if self.global_enable else "白名单(默认关)"
         enabled = self._is_session_enabled(sid)
         yield event.plain_result(
-            f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s, allow_mixed={self.allow_mixed}"
+            f"模式: {mode}\n当前会话: {'启用' if enabled else '禁用'}\nprob={self.prob}, limit={self.text_limit}, cooldown={self.cooldown}s\nallow_mixed={self.allow_mixed}, smart_detection={'开启' if self.smart_detection else '关闭'}"
         )
 
     @filter.command("tts_mixed_on", priority=1)
@@ -1267,6 +1326,34 @@ class TTSEmotionRouter(Star):
         except Exception:
             pass
         yield event.plain_result("TTS混合输出：关闭（仅纯文本时尝试合成）")
+
+    @filter.command("tts_smart_on", priority=1)
+    async def tts_smart_on(self, event: AstrMessageEvent):
+        """启用智能检测：自动识别代码内容并跳过TTS，保留文本输出"""
+        self.smart_detection = True
+        try:
+            if self.config is not None and (
+                isinstance(self.config, AstrBotConfig) or isinstance(self.config, dict)
+            ):
+                self.config["smart_detection"] = True
+                self._save_config()
+        except Exception:
+            pass
+        yield event.plain_result("TTS智能检测：开启（代码内容将跳过语音转换，保留文本）")
+
+    @filter.command("tts_smart_off", priority=1)
+    async def tts_smart_off(self, event: AstrMessageEvent):
+        """关闭智能检测：所有内容都尝试TTS转换（传统模式）"""
+        self.smart_detection = False
+        try:
+            if self.config is not None and (
+                isinstance(self.config, AstrBotConfig) or isinstance(self.config, dict)
+            ):
+                self.config["smart_detection"] = False
+                self._save_config()
+        except Exception:
+            pass
+        yield event.plain_result("TTS智能检测：关闭（所有文本都将尝试语音转换）")
 
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
     # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
@@ -1414,6 +1501,12 @@ class TTSEmotionRouter(Star):
             event.continue_event()
             return
 
+        # 检查是否为命令回复，如果是则跳过TTS处理
+        if self._is_command_input(event):
+            logging.info("TTS skip: detected command input, preserving text-only output")
+            event.continue_event()
+            return
+
         # 清理首个 Plain 的隐藏情绪头 - 增强版本
         try:
             new_chain = []
@@ -1463,6 +1556,13 @@ class TTSEmotionRouter(Star):
         # 过滤链接/文件等提示性内容，避免朗读
         if re.search(r"(https?://|www\.|\[图片\]|\[文件\]|\[转发\]|\[引用\])", text, re.I):
             logging.info("TTS skip: detected link/attachment tokens")
+            event.continue_event()
+            return
+        
+        # 智能检测代码内容，跳过TTS但保留文本输出（可配置）
+        if self.smart_detection and self._contains_code_content(text):
+            logging.info("TTS skip: smart detection found code content, preserving text output")
+            # 保持原始文本输出，不进行TTS转换
             event.continue_event()
             return
 
