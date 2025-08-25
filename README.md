@@ -278,7 +278,7 @@ tts_status
 
 ### 🎭 自定义音色上传
 
-使用官方音色上传工具：[下载地址](https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router/releases/tag/v0.1.1)
+使用音色上传工具：[下载地址](https://github.com/muyouzhi6/astrabot_plugin_tts_emotion_router/releases/tag/v0.1.1)
 
 **需要准备：**
 - 5MB 以下的 10 秒左右清晰人声素材
