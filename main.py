@@ -438,7 +438,7 @@ class TTSEmotionRouter(Star):
         return sid in self.enabled_sessions
 
     def _normalize_text(self, text: str) -> str:
-        """移除不可见字符与BOM，避免破坏头部匹配。"""
+        """移除不可见字符与BOM，过滤代码块和emoji，避免破坏头部匹配。"""
         if not text:
             return text
         invisibles = [
@@ -456,6 +456,15 @@ class TTSEmotionRouter(Star):
         ]
         for ch in invisibles:
             text = text.replace(ch, "")
+        
+        # 新增：过滤代码块
+        text = self._filter_code_blocks(text)
+        if not text:  # 如果过滤后为空，直接返回
+            return text
+        
+        # 新增：过滤emoji和QQ表情
+        text = self._filter_emoji_and_qq_expressions(text)
+        
         return text
 
     def _normalize_label(self, label: Optional[str]) -> Optional[str]:
@@ -591,16 +600,150 @@ class TTSEmotionRouter(Star):
             return cleaned.strip(), None
         return text, None
 
+    def _filter_code_blocks(self, text: str) -> str:
+        """过滤markdown代码块和行内代码"""
+        if not text:
+            return text
+        
+        # 过滤代码块 ```代码```
+        text = re.sub(r'```[\s\S]*?```', '[代码块]', text)
+        
+        # 过滤行内代码 `代码`
+        text = re.sub(r'`[^`\n]+`', '[代码]', text)
+        
+        # 过滤看起来像代码的内容（包含特殊符号组合）
+        code_patterns = [
+            r'\b\w+\(\s*\)',  # 函数调用 func()
+            r'\b\w+\.\w+\(',   # 方法调用 obj.method(
+            r'<[^>]+>',        # HTML/XML标签
+            r'\w+://\S+',      # URLs
+        ]
+        
+        for pattern in code_patterns:
+            if re.search(pattern, text):
+                # 如果检测到代码特征，标记跳过TTS
+                return ""
+        
+        return text
+
+    def _filter_emoji_and_qq_expressions(self, text: str) -> str:
+        """过滤emoji表情和QQ表情符号"""
+        if not text:
+            return text
+        
+        # 过滤Unicode emoji - 修正版本
+        emoji_pattern = re.compile(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002702-\U000027B0\U000024C2-\U000024FF]+')
+        text = emoji_pattern.sub('', text)
+        
+        # 更精确的QQ表情过滤：只过滤常见的表情词汇，而不是所有中文
+        qq_emotions = [
+            '哈哈', '呵呵', '嘿嘿', '嘻嘻', '哭哭', '呜呜', 
+            '汗', '晕', '怒', '抓狂', '吐血', '偷笑', 
+            '色', '亲亲', '惊讶', '难过', '酷', '冷汗',
+            '发呆', '害羞', '闭嘴', '睡觉', '大哭', '尴尬',
+            '发怒', '调皮', '呲牙', '惊喜', '流汗', '憨笑'
+        ]
+        
+        # 构建精确的QQ表情模式
+        qq_emotion_pattern = '|'.join(re.escape(emotion) for emotion in qq_emotions)
+        qq_pattern = re.compile(rf'\[({qq_emotion_pattern})\]')
+        text = qq_pattern.sub('', text)
+        
+        # 过滤颜文字和ASCII艺术
+        emoticon_patterns = [
+            r'[><!]{2,}',      # >>>>, <<<<, !!!!
+            r'[:;=][)\(DPOop]{1,}',  # :) :( :D =) ;P
+            r'[)\(]{2,}',      # ))) (((
+            r'[-_]{3,}',       # --- ___
+        ]
+        
+        for pattern in emoticon_patterns:
+            text = re.sub(pattern, '', text)
+        
+        return text.strip()
+
+    def _deep_clean_emotion_tags(self, text: str) -> str:
+        """深度清理各种形式的情绪标签"""
+        if not text:
+            return text
+        
+        # 清理各种情绪标签变体 - 修正版本，移除过激模式
+        patterns = [
+            r'^\s*\[?\s*emo\s*[:：]?\s*\w*\s*\]?\s*[,，。:\uff1a]*\s*',  # emo: 开头
+            r'^\s*\[?\s*EMO\s*[:：]?\s*\w*\s*\]?\s*[,，。:\uff1a]*\s*',  # EMO: 开头
+            r'^\s*【\s*[Ee][Mm][Oo]\s*[:：]?\s*\w*\s*】\s*[,，。:\uff1a]*\s*',  # 【EMO:】
+            r'\[情绪[:：]\w*\]',       # [情绪:xxx]
+            r'\[心情[:：]\w*\]',       # [心情:xxx]
+            r'^\s*情绪[:：]\s*\w+\s*[,，。]\s*',  # 情绪:xxx, 只清理开头的
+            # 移除过于激进的模式: r'^[,，。:\uff1a\s]*'
+        ]
+        
+        for pattern in patterns:
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+        
+        return text.strip()
+
+    def _ensure_proper_ending(self, text: str) -> str:
+        """确保文本有适当的结尾，防止最后一个字被吞"""
+        if not text or not text.strip():
+            return text
+        
+        text = text.strip()
+        
+        # 如果文本不以标点符号结尾，添加句号
+        if not re.search(r'[。！？.!?，,]$', text):
+            # 根据内容语言添加适当的标点
+            if re.search(r'[\u4e00-\u9fff]', text):  # 包含中文
+                text += '。'
+            else:  # 英文或其他
+                text += '.'
+        
+        # 在结尾添加短暂停顿（通过符号实现）
+        if not text.endswith('...'):
+            text += '..'  # 添加额外停顿防止吞字
+        
+        return text
+
+    def _final_text_cleanup(self, text: str) -> str:
+        """TTS前的最终文本清理"""
+        if not text:
+            return text
+        
+        # 最后一次情绪标签清理
+        text = self._deep_clean_emotion_tags(text)
+        
+        # 清理多余的空白字符
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # 移除可能导致TTS问题的字符
+        problematic_chars = ['�', '\ufffd', '\x00', '\ufeff']
+        for char in problematic_chars:
+            text = text.replace(char, '')
+        
+        # 如果清理后文本为空或太短，返回空字符串跳过TTS
+        if len(text.strip()) < 2:
+            return ""
+        
+        return text
+
     def _strip_emo_head_many(self, text: str) -> tuple[str, Optional[str]]:
         """连续剥离多枚开头的EMO/emo标记（若LLM/其它插件重复注入）。返回(清理后文本, 最后一次解析到的情绪)。"""
         last_label: Optional[str] = None
-        while True:
+        max_iterations = 5  # 防止无限循环
+        iteration = 0
+        
+        while iteration < max_iterations:
             cleaned, label = self._strip_emo_head(text)
             if label:
                 last_label = label
-            if cleaned == text:
+            if cleaned == text:  # 没有更多变化
                 break
             text = cleaned
+            iteration += 1
+        
+        # 额外的全局情绪标签清理
+        text = self._deep_clean_emotion_tags(text)
+        
         return text, last_label
 
     # ---------------- LLM 请求前：注入情绪标记指令 -----------------
@@ -896,6 +1039,20 @@ class TTSEmotionRouter(Star):
             # 生成音频
             yield event.plain_result(f"正在生成测试音频：\"{text}\"...")
             
+            # 添加文本预处理诊断
+            original_text = text
+            normalized_text = self._normalize_text(text)
+            cleaned_text, _ = self._strip_emo_head_many(normalized_text)
+            final_text = self._final_text_cleanup(cleaned_text)
+            processed_text = self._ensure_proper_ending(final_text)
+            
+            # 显示文本处理过程
+            if original_text != processed_text:
+                yield event.plain_result(f"📝 文本预处理过程：\n原始: \"{original_text}\"\n处理后: \"{processed_text}\"")
+            
+            # 使用处理后的文本进行测试
+            text = processed_text
+            
             start_time = time.time()
             audio_path = self.tts.synth(text, voice, out_dir, speed=None)
             generation_time = time.time() - start_time
@@ -985,6 +1142,56 @@ class TTSEmotionRouter(Star):
             
         except Exception as e:
             yield event.plain_result(f"❌ 获取调试信息失败: {e}")
+
+    @filter.command("tts_test_problematic", priority=1)
+    async def tts_test_problematic(self, event: AstrMessageEvent):
+        """测试各种问题文本的处理效果"""
+        try:
+            # 测试用例：各种可能导致问题的文本
+            test_cases = [
+                "[EMO:happy] 这是带情绪标签的文本",
+                "【EMO：sad】这是全角情绪标签",  
+                "emo:angry 这是简化情绪标签",
+                "```python\nprint('hello')\n``` 这里有代码块",
+                "`console.log()` 行内代码测试",
+                "😀😢😡 emoji表情测试",
+                "[哈哈][呵呵] QQ表情测试", 
+                "function test() {} 代码特征测试",
+                ">>> 特殊符号测试 <<<",
+                ":) :( :D 颜文字测试",
+                "没有标点的文本",
+            ]
+            
+            result_msg = "🧪 问题文本处理测试结果：\n\n"
+            
+            for i, test_text in enumerate(test_cases, 1):
+                # 执行完整的文本处理流程
+                try:
+                    original = test_text
+                    normalized = self._normalize_text(test_text)
+                    cleaned, emotion = self._strip_emo_head_many(normalized)
+                    final_cleaned = self._deep_clean_emotion_tags(cleaned)
+                    final_text = self._final_text_cleanup(final_cleaned)
+                    ended_text = self._ensure_proper_ending(final_text)
+                    
+                    # 记录处理结果
+                    result_msg += f"{i}. 测试: {original[:30]}{'...' if len(original) > 30 else ''}\n"
+                    if original != ended_text:
+                        result_msg += f"   处理后: {ended_text[:30]}{'...' if len(ended_text) > 30 else ''}\n"
+                        if emotion:
+                            result_msg += f"   检测情绪: {emotion}\n"
+                        result_msg += f"   状态: {'✅ 可转TTS' if ended_text and len(ended_text.strip()) >= 2 else '❌ 已过滤'}\n"
+                    else:
+                        result_msg += f"   状态: ✅ 无需处理\n"
+                    result_msg += "\n"
+                    
+                except Exception as e:
+                    result_msg += f"   ❌ 处理异常: {e}\n\n"
+            
+            yield event.plain_result(result_msg)
+            
+        except Exception as e:
+            yield event.plain_result(f"❌ 测试失败: {e}")
 
     @filter.command("tts_gain", priority=1)
     async def tts_gain(self, event: AstrMessageEvent, *, value: Optional[str] = None):
@@ -1212,7 +1419,7 @@ class TTSEmotionRouter(Star):
                 pass
             return
 
-        # 清理首个 Plain 的隐藏情绪头
+        # 清理首个 Plain 的隐藏情绪头 - 增强版本
         try:
             new_chain = []
             cleaned_once = False
@@ -1223,7 +1430,9 @@ class TTSEmotionRouter(Star):
                     and getattr(comp, "text", None)
                 ):
                     t0 = self._normalize_text(comp.text)
+                    # 多层清理
                     t, _ = self._strip_emo_head_many(t0)
+                    t = self._deep_clean_emotion_tags(t)  # 新增深度清理
                     if t:
                         new_chain.append(Plain(text=t))
                     cleaned_once = True
@@ -1351,6 +1560,26 @@ class TTSEmotionRouter(Star):
         try:
             if text and (text.lower().lstrip().startswith("emo") or text.lstrip().startswith(("[", "【", "("))):
                 text, _ = self._strip_emo_head_many(text)
+        except Exception:
+            pass
+
+        # TTS合成前的最终文本处理
+        try:
+            # 最终清理各种遗留的情绪标签和特殊内容
+            text = self._final_text_cleanup(text)
+            
+            # 防止最后一个字被吞：确保文本以适当的标点结尾
+            text = self._ensure_proper_ending(text)
+            
+            # 如果清理后文本为空，跳过TTS
+            if not text or len(text.strip()) < 2:
+                logging.info("TTS skip: text empty after final cleanup")
+                try:
+                    event.continue_event()
+                except Exception:
+                    pass
+                return
+                
         except Exception:
             pass
 
