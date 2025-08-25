@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 import asyncio
 
 def _ensure_compatible_astrbot():
-    """确保 astrbot API 兼容；若宿主astrbot不满足需要，则回退到插件自带的 AstrBot。"""
+    """确保 astrbot API 兼容；若宿主astrbot不满足需要，回退到插件自带的 AstrBot。"""
     _PLUGIN_DIR = Path(__file__).parent
     _VENDORED_ROOT = _PLUGIN_DIR / "AstrBot"
     _VENDORED_ASTROBOT = _VENDORED_ROOT / "astrbot"
