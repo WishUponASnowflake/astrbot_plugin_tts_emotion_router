@@ -365,7 +365,7 @@ timeout: 15         # 缩短超时时间
 
 - **作者**：木有知
 - **仓库**：https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router
-- **版本**：0.1.1
+- **版本**：0.2.1
 
 ---
 
