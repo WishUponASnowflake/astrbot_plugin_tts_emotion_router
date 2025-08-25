@@ -73,7 +73,7 @@
 5. **打开配置面板**
    - 访问：http://localhost:6185
    - 进入插件管理 → TTS情绪路由插件
-
+### 推荐可与STT插件配合实现与bot全语音交流https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin
 ### ⚙️ 基础配置
 
 <details>
@@ -94,13 +94,10 @@
 
 ```yaml
 # 音色映射（必须至少配置 neutral）
-voice_map:
+例：
   neutral: "FunAudioLLM/CosyVoice2-0.5B:anna"    # 中性音色
-  happy: "FunAudioLLM/CosyVoice2-0.5B:cheerful"  # 开心音色
-  sad: "FunAudioLLM/CosyVoice2-0.5B:gentle"      # 难过音色
-  angry: "FunAudioLLM/CosyVoice2-0.5B:serious"   # 愤怒音色
 
-# 语速映射
+# 语速映射（自己按喜欢整吧）
 speed_map:
   neutral: 1.0    # 正常语速
   happy: 1.2      # 开心加速
@@ -128,7 +125,7 @@ emotion:
 ## 🎯 使用指南
 
 ### 💡 推荐配置流程
-
+<img width="580" height="1368" alt="PixPin_2025-08-25_17-00-01" src="https://github.com/user-attachments/assets/6cd57fb9-9b39-4dae-80e4-c9bd0c3400de" />
 1. **配置系统提示**
    在你的 AI 人格设定中添加：
    ```
