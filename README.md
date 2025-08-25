@@ -73,7 +73,8 @@
 5. **打开配置面板**
    - 访问：http://localhost:6185
    - 进入插件管理 → TTS情绪路由插件
-### 推荐可与STT插件配合实现与bot全语音交流https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin
+### 推荐可与STT插件配合实现与bot全语音交流
+##https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin
 ### ⚙️ 基础配置
 
 <details>
