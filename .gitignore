@@ -1,27 +1,38 @@
-# Byte-compiled / cache
+# 测试文件
+*test*.py
+test_*.py
+debug_*.py
+*debug*.py
+
+# 数据文件
+data/
+*.db
+*.sqlite
+*.json
+
+# 临时文件
+*.tmp
+*.temp
+*.log
+*.cache
+
+# Python 字节码
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
 
-# Temp & outputs
-temp/
-.temp/
-*.wav
-*.mp3
-*.m4a
+# 环境变量文件
+.env
+.env.local
+.env.*.local
 
-# Local env
-.venv/
-.env/
-
-# Vendored framework (must NOT ship)
-AstrBot/
-
-# Editor
+# IDE 文件
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Local config (use panel or sample file)
-config.json
-
-# Archives
-*.zip
+# 操作系统文件
+.DS_Store
+Thumbs.db
