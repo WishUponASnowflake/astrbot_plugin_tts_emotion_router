@@ -1865,3 +1865,10 @@ class TTSEmotionRouter(Star):
             await self._append_assistant_text_to_history(event, text)
         except Exception:
             pass
+
+
+# 兼容性：为旧版本AstrBot提供插件类导出
+Main = TTSEmotionRouter
+
+# 确保插件类能被发现
+__all__ = ['TTSEmotionRouter', 'Main']
