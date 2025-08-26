@@ -1,6 +1,6 @@
 # 🎭 AstrBot TTS 情绪路由插件
 
-[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router)
+
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 
