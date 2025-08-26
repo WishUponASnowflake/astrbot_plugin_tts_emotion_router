@@ -151,7 +151,7 @@ class SessionState:
     "astrbot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.2.2",
+    "0.1.1",
 )
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -1865,10 +1865,3 @@ class TTSEmotionRouter(Star):
             await self._append_assistant_text_to_history(event, text)
         except Exception:
             pass
-
-
-# 兼容性：为旧版本AstrBot提供插件类导出
-Main = TTSEmotionRouter
-
-# 确保插件类能被发现
-__all__ = ['TTSEmotionRouter', 'Main']
