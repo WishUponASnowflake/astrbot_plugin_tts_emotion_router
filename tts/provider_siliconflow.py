@@ -1,6 +1,5 @@
 import hashlib
 import json
-import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -90,18 +89,6 @@ class SiliconFlowTTS:
     def synth(
         self, text: str, voice: str, out_dir: Path, speed: Optional[float] = None
     ) -> Optional[Path]:
-        # 预处理文本，防止最后一个字被吞
-        if text and not text.endswith(('。', '.', '！', '!', '？', '?')):
-            # 根据内容语言添加适当的标点
-            if re.search(r'[\u4e00-\u9fff]', text):  # 包含中文
-                text = text.strip() + '。'
-            else:  # 英文或其他
-                text = text.strip() + '.'
-        
-        # 添加微小停顿符号帮助TTS更好地处理结尾
-        if text and not text.endswith('...'):
-            text = text + '..'
-        
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.api_url or not self.api_key:

@@ -9,11 +9,29 @@ NEG_WORDS = {"难过", "伤心", "失望", "糟糕", "无语", "唉", "sad", ":(
 ANG_WORDS = {"气死", "愤怒", "生气", "nm", "tmd", "淦", "怒", "怒了", "😡"}
 
 URL_RE = re.compile(r"https?://|www\.")
+# 代码块检测
+CODE_BLOCK_RE = re.compile(r'```[a-zA-Z0-9_+-]*\n.*?\n```', re.DOTALL)
+INLINE_CODE_RE = re.compile(r'`([^`\n]+)`')
 
 
 def is_informational(text: str) -> bool:
     # 包含链接/代码/文件提示等，视为信息性，倾向 neutral
-    return bool(URL_RE.search(text or ""))
+    has_url = bool(URL_RE.search(text or ""))
+    has_code_block = bool(CODE_BLOCK_RE.search(text or ""))
+    # 对于行内代码，只检测包含复杂内容的（不是单个模型名）
+    has_inline_code = False
+    for match in INLINE_CODE_RE.finditer(text or ""):
+        code_content = match.group(1)
+        # 如果包含空格、换行符或多个符号，很可能是真正的代码
+        if (' ' in code_content or
+            '\n' in code_content or
+            code_content.count('.') > 1 or
+            code_content.count('/') > 1 or
+            len(code_content) > 20):
+            has_inline_code = True
+            break
+    
+    return has_url or has_code_block or has_inline_code
 
 
 def classify(text: str, context: Optional[List[str]] = None) -> str:
