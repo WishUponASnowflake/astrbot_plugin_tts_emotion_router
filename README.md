@@ -67,6 +67,10 @@
 }
 ```
 
+### 音色上传
+[default (1).zip](https://github.com/user-attachments/files/22064338/default.1.zip)
+
+
 ### 语速映射
 为不同情绪配置语速：
 ```json
@@ -175,3 +179,4 @@
 ## 📄 许可证
 
 MIT License
+
