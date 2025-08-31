@@ -1,6 +1,6 @@
 # 🎭 AstrBot TTS 情绪路由插件
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router)
+[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)](https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 
@@ -23,12 +23,14 @@
 - **表情符号处理**：智能过滤 emoji 和 QQ 表情，避免朗读 `[微笑]` `😀`
 - **链接检测**：自动跳过 URL 和文件路径
 - **文本优化**：防止 TTS 吞字，确保完整朗读
+- **参考文献控制**：可选择是否显示提取的代码和链接的参考文献
 
 ### ⚡ 高级控制
 - **会话级开关**：每个对话独立控制 TTS 开关
 - **概率门控**：可设置触发概率，避免过度朗读
 - **长度限制**：超长文本自动跳过，专注短句对话
 - **冷却机制**：防止频繁触发，优化体验
+- **系统指令识别**：自动识别系统指令（如 /help、/provider 等），直接文本输出，不进行TTS转换
 
 ## 🚀 快速开始
 
@@ -167,6 +169,7 @@ emotion:
 | `tts_limit 100` | 设置长度限制 | 超过100字跳过 |
 | `tts_cooldown 30` | 设置冷却时间 | 30秒内不重复 |
 | `tts_status` | 查看状态 | 显示当前配置 |
+| `tts_refs_on/off` | 参考文献开关 | 控制是否显示代码和链接的参考文献 |
 
 ### 🏷️ 支持的情绪标签格式
 
@@ -340,7 +343,17 @@ timeout: 15         # 缩短超时时间
 ```
 
 ## 📈 版本历史
-- **v0.3.0 **(当前)
+- **v0.3.2** (当前)
+- 📚 新增参考文献显示开关功能，用户可选择是否显示代码和链接的参考文献
+- 🎮 新增 `tts_refs_on/off` 命令，方便动态控制参考文献显示
+- 🛠️ 优化 `tts_check_refs` 命令，显示更详细的配置信息
+
+- **v0.3.1**
+- 🎯 新增系统指令识别功能，自动跳过 help、provider 等系统命令的TTS转换
+- 🛡️ 优化消息类型判断逻辑，更准确地区分LLM响应和系统响应
+- 📝 完善日志输出，便于调试和问题排查
+
+- **v0.3.0**
 - ✨ 新增代码和链接智能提取功能
 - 🎯 优化输出体验，避免内容重复
 - 📖 移除多余的标题文字，展示更简洁
@@ -377,7 +390,7 @@ timeout: 15         # 缩短超时时间
 
 - **作者**：木有知
 - **仓库**：https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router
-- **版本**：0.2.1
+- **版本**：0.3.2
 
 ---
 

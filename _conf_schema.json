@@ -42,6 +42,12 @@
     "type": "bool",
     "default": false
   },
+  "show_references": {
+    "description": "是否显示参考文献（当文本包含代码或链接时）",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后会在TTS音频后附加提取的代码和链接的参考文献"
+  },
   "api": {
     "description": "硅基流动 API 设置",
     "type": "object",

@@ -152,7 +152,7 @@ class SessionState:
     "astrbot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.3.0",
+    "0.3.2",
 )
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -220,6 +220,7 @@ class TTSEmotionRouter(Star):
         self.text_limit: int = int(self.config.get("text_limit", 80))
         self.cooldown: int = int(self.config.get("cooldown", 20))
         self.allow_mixed: bool = bool(self.config.get("allow_mixed", False))
+        self.show_references: bool = bool(self.config.get("show_references", True))
         # 情绪分类：仅启发式 + 隐藏标记
         emo_cfg = self.config.get("emotion", {}) or {}
         self.heuristic_cls = HeuristicClassifier()
@@ -1053,8 +1054,26 @@ class TTSEmotionRouter(Star):
         yield event.plain_result(
             f"allow_mixed配置: {self.allow_mixed}\n"
             f"配置文件中的allow_mixed: {self.config.get('allow_mixed', '未找到')}\n"
-            f"参考文献发送条件: {'满足' if self.allow_mixed else '不满足 (需要开启 allow_mixed)'}"
+            f"show_references配置: {self.show_references}\n"
+            f"配置文件中的show_references: {self.config.get('show_references', '未找到')}\n"
+            f"参考文献发送条件: {'满足' if self.show_references else '不满足 (需要开启 show_references)'}"
         )
+
+    @filter.command("tts_refs_on", priority=1)
+    async def tts_refs_on(self, event: AstrMessageEvent):
+        """开启参考文献显示"""
+        self.show_references = True
+        self.config["show_references"] = True
+        self._save_config()
+        yield event.plain_result("参考文献显示：开启（包含代码或链接时会显示参考文献）")
+
+    @filter.command("tts_refs_off", priority=1)
+    async def tts_refs_off(self, event: AstrMessageEvent):
+        """关闭参考文献显示"""
+        self.show_references = False
+        self.config["show_references"] = False
+        self._save_config()
+        yield event.plain_result("参考文献显示：关闭（包含代码或链接时不会显示参考文献）")
 
     # ---------------- After send hook: 防止重复 RespondStage 再次发送 -----------------
     # 兼容不同 AstrBot 版本：优先使用 after_message_sent，其次回退 on_after_message_sent；都没有则不挂载该钩子。
@@ -1202,6 +1221,34 @@ class TTSEmotionRouter(Star):
                 logging.info("TTSEmotionRouter.on_decorating_result: detected STOP at entry, forcing CONTINUE for decorating")
                 event.continue_event()
         except Exception:
+            pass
+
+        # 检查是否为系统指令响应（非LLM生成的结果）
+        try:
+            result = event.get_result()
+            if result:
+                # 检查是否为LLM结果
+                is_llm_response = False
+                try:
+                    # 方法1：使用is_llm_result()方法
+                    is_llm_response = result.is_llm_result()
+                except Exception:
+                    # 方法2：直接检查result_content_type
+                    is_llm_response = (getattr(result, "result_content_type", None) == ResultContentType.LLM_RESULT)
+                
+                # 如果不是LLM响应，则跳过TTS处理
+                if not is_llm_response:
+                    logging.info("TTS skip: not an LLM response (likely a system command or plugin response)")
+                    try:
+                        event.continue_event()
+                    except Exception:
+                        pass
+                    return
+                    
+                logging.info("TTS processing: LLM response detected, proceeding with TTS")
+        except Exception as e:
+            logging.warning(f"TTS: error checking response type: {e}")
+            # 如果检查过程出错，继续后续处理
             pass
 
         sid = self._sess_id(event)
@@ -1470,14 +1517,15 @@ class TTSEmotionRouter(Star):
                 st.last_tts_time = time.time()
                 st.last_ts = time.time()
 
-                # 如果有代码或链接，只发送参考文献（不包含原文）
+                # 如果有代码或链接，根据配置决定是否发送参考文献
                 if references:
-                    # TTS已经输出了完整内容，文本只补充参考文献
-                    if references.strip():
+                    if self.show_references and references.strip():
+                        # TTS已经输出了完整内容，文本只补充参考文献
                         logging.info("TTS: sending references only (no original text)")
                         result.chain = [Plain(text=references), record]
                     else:
-                        logging.warning("TTS: references is empty, sending audio only")
+                        # 不显示参考文献，只发送音频
+                        logging.info("TTS: references disabled, sending audio only")
                         result.chain = [record]
                 else:
                     # 没有参考文献，根据 allow_mixed 决定是否同时发送文本
