@@ -38,7 +38,8 @@
 1. 在 AstrBot 后台【插件市场】搜索并安装 / 启用 “astrbot_plugin_tts_emotion_router”。  
 2. 安装 ffmpeg（系统仅需能调用 ffmpeg 命令）。  
 3. 拥有硅基流动（或兼容 OpenAI TTS 接口）的 API Key。  
-4. （可选）使用提供的音色上传工具压缩包导入自定义音色[硅基音色一键上传.zip](https://github.com/user-attachments/files/22064355/default.zip)。  
+4. （可选）使用提供的音色上传工具压缩包导入自定义音色
+   [硅基音色一键上传.zip](https://github.com/user-attachments/files/22064355/default.zip)。  
 5. 在插件配置里填写 api 信息与 voice_map / speed_map。  
 6. 用 `tts_status` / `tts_debug 你好` 验证。  
 
@@ -414,6 +415,7 @@ timeout: 15         # 缩短超时时间
 *让每一句话都充满感情！*
 
 </div>
+
 
 
 
