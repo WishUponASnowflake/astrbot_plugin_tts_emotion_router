@@ -1,6 +1,6 @@
 # 🎭 AstrBot TTS 情绪路由插件
 
-[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)](https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 
@@ -343,10 +343,19 @@ timeout: 15         # 缩短超时时间
 ```
 
 ## 📈 版本历史
-- **v0.3.2** (当前)
-- 📚 新增参考文献显示开关功能，用户可选择是否显示代码和链接的参考文献
-- 🎮 新增 `tts_refs_on/off` 命令，方便动态控制参考文献显示
-- 🛠️ 优化 `tts_check_refs` 命令，显示更详细的配置信息
+- **v0.4.0** (当前)
+   - 🧩 代码/链接提取大幅优化：减少普通词、文件名、伪域名误判；支持去重、域名白名单、伪方法链过滤。
+   - 🔍 行内代码智能判定：仅保留真正变量/函数/表达式；忽略模型名、版本号、纯扩展名及简单文件名。
+   - 🔗 链接处理：去除重复、半截文件名与方法链不再当作链接；支持合法 TLD 过滤；保留真实 URL。
+   - 📚 参考文献可配置：新增 `references.preview_limit` 与 `references.max_total_chars`；默认不截断完整显示。
+   - 🧪 新增扩展测试用例覆盖 tavily、TAVILY_API_KEY、hello.py、plugin.html、伪域名等场景。
+   - 🛠️ 结构清理：提取逻辑模块化，便于后续扩展调试模式。
+   - ⚙️ 兼容旧行为：默认配置保持与 0.3.x 一致（显示参考文献，不截断代码）。
+
+- **v0.3.2**
+   - 📚 新增参考文献显示开关功能，用户可选择是否显示代码和链接的参考文献
+   - 🎮 新增 `tts_refs_on/off` 命令，方便动态控制参考文献显示
+   - 🛠️ 优化 `tts_check_refs` 命令，显示更详细的配置信息
 
 - **v0.3.1**
 - 🎯 新增系统指令识别功能，自动跳过 help、provider 等系统命令的TTS转换
@@ -390,7 +399,7 @@ timeout: 15         # 缩短超时时间
 
 - **作者**：木有知
 - **仓库**：https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router
-- **版本**：0.3.2
+- **版本**：0.4.0
 
 ---
 

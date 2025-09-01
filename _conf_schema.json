@@ -99,5 +99,13 @@
       "sad": { "description": "伤心语速", "type": "float", "default": 0.85 },
       "angry": { "description": "愤怒语速", "type": "float", "default": 1.1 }
     }
+  },
+  "references": {
+    "description": "参考文献显示策略",
+    "type": "object",
+    "items": {
+      "preview_limit": { "description": "单段代码最大展示字符(0=不截断)", "type": "int", "default": 0 },
+      "max_total_chars": { "description": "参考文献总字符上限(0=不限制)", "type": "int", "default": 0 }
+    }
   }
 }

@@ -152,7 +152,7 @@ class SessionState:
     "astrbot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.3.2",
+    "0.4.0",
 )
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -605,6 +605,28 @@ class TTSEmotionRouter(Star):
             text = cleaned
         return text, last_label
 
+    def _strip_any_visible_markers(self, text: str) -> str:
+        """更激进：移除文本任意位置的隐藏情绪标记：
+        [EMO:happy] / 【EMO：sad】 / (EMO:angry) 等，无论在开头、行首或句中均清理。
+        仅匹配当前配置 tag 与四种标准标签(happy|sad|angry|neutral)。
+        """
+        try:
+            tag = re.escape(self.emo_marker_tag)
+            # 1) 行首/段首（保留换行）
+            head_pat = re.compile(rf'(^|\n)\s*[\[\(【]\s*{tag}\s*[:：-]\s*(happy|sad|angry|neutral)\s*[\]\)】]\s*', re.I)
+            def _head_sub(m):
+                return "\n" if m.group(1) == "\n" else ""
+            text = head_pat.sub(_head_sub, text)
+            # 2) 句中：直接全局删除（不再保留空行）
+            mid_pat = re.compile(rf'[\[\(【]\s*{tag}\s*[:：-]\s*(happy|sad|angry|neutral)\s*[\]\)】]', re.I)
+            text = mid_pat.sub('', text)
+            # 3) 清理多余空白
+            text = re.sub(r'[ \t]{2,}', ' ', text)
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            return text.strip()
+        except Exception:
+            return text
+
     # ---------------- LLM 请求前：注入情绪标记指令 -----------------
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request):
@@ -687,6 +709,27 @@ class TTSEmotionRouter(Star):
                 except Exception:
                     pass
                 cached_text = cleaned or cached_text
+        except Exception:
+            pass
+
+    # ---------------- 最终装饰阶段：兜底去除情绪标记泄露 -----------------
+    @filter.on_decorating_result(priority=999)
+    async def _final_strip_markers(self, event: AstrMessageEvent):  # type: ignore[override]
+        try:
+            if not self.emo_marker_enable:
+                return
+            result = event.get_result()
+            if not result or not hasattr(result, 'chain'):
+                return
+            changed = False
+            for comp in list(result.chain):
+                if isinstance(comp, Plain) and getattr(comp, 'text', None):
+                    new_txt = self._strip_any_visible_markers(comp.text)
+                    if new_txt != comp.text:
+                        comp.text = new_txt
+                        changed = True
+            if changed:
+                logging.debug("TTSEmotionRouter: final marker cleanup applied")
         except Exception:
             pass
 
