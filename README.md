@@ -32,52 +32,57 @@
 - **冷却机制**：防止频繁触发，优化体验
 - **系统指令识别**：自动识别系统指令（如 /help、/provider 等），直接文本输出，不进行TTS转换
 
-## 🚀 快速开始
+## 🚀 快速开始（60 秒上手）
 
-### 📋 环境要求
+### ✅ 你实际只需要做这些
+1. 在 AstrBot 后台【插件市场】搜索并安装 / 启用 “TTS 情绪路由插件”。  
+2. 安装 ffmpeg（系统仅需能调用 ffmpeg 命令）。  
+3. 拥有硅基流动（或兼容 OpenAI TTS 接口）的 API Key。  
+4. （可选）使用提供的音色上传工具压缩包导入自定义音色。  
+5. 在插件配置里填写 api 信息与 voice_map / speed_map。  
+6. 在你的系统/人格提示中加入情绪标签提示（示例在下文 “情绪标签配置”）。  
+7. 用 `tts_status` / `tts_debug 你好` 验证。  
 
-- **AstrBot** v3.5+ 
-- **Python** 3.8+
-- **ffmpeg**（音频处理必需）
-- **硅基流动 API Key**（或其他兼容的 OpenAI 语音 API）
+完成！无需 git clone、本地手动拷代码、也无需额外 pip 安装（AstrBot 主程序已包含通用依赖）。
 
-### 📦 安装步骤
+### 📋 运行所需
+- AstrBot v3.5+ 已运行
+- ffmpeg（必需）
+- 硅基流动 API Key（或其它兼容语音合成服务）
 
-1. **下载插件**
-   ```bash
-   cd data/plugins/
-   git clone https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router.git tts_emotion_router
-   ```
+### 📦 ffmpeg 安装示例
+```bash
+# Linux (Debian/Ubuntu)
+sudo apt install -y ffmpeg
 
-2. **安装 ffmpeg**
-   ```bash
-   # Ubuntu/Debian
-   sudo apt install ffmpeg
-   
-   # Windows (使用 chocolatey)
-   choco install ffmpeg
-   
-   # macOS
-   brew install ffmpeg
-   ```
+# macOS (Homebrew)
+brew install ffmpeg
 
-3. **安装依赖**
-   ```bash
-   cd /path/to/astrbot
-   uv sync  # requests 已包含在 AstrBot 依赖中
-   ```
+# Windows (Chocolatey 管理员 PowerShell)
+choco install ffmpeg -y
+```
+安装后确认：`ffmpeg -version` 输出版本即可。
 
-4. **启动 AstrBot**
-   ```bash
-   uv run main.py
-   ```
+### 🎙 自定义音色（可选）
+1. 下载 README 下方链接的 “硅基音色一键上传” 压缩包。
+2. 解压并按提示运行（通常是一个脚本或可执行程序）。
+3. 录入或选择音色素材，上传生成对应的自定义音色标识。
+4. 在插件配置 `voice_map` 中填入生成的音色名（格式示例：`FunAudioLLM/CosyVoice2-0.5B:anna` 或你的自定义 ID）。
 
-5. **打开配置面板**
-   - 访问：http://localhost:6185
-   - 进入插件管理 → TTS情绪路由插件
+### 🧪 验证与调试
+```bash
+tts_status          # 查看当前插件总体状态
+tts_debug "你好，今天天气不错！"  # 观察情绪识别 + 过滤效果
+tts_refs_on / tts_refs_off       # 开启/关闭参考文献显示
+```
 
-### 推荐可与STT插件配合实现与bot全语音交流
-##https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin
+### 🛠 离线/手动安装（很少需要）
+仅在无法访问插件市场时：将发布的 zip/源码目录解压到 `data/plugins/astrbot_plugin_tts_emotion_router`，重启 AstrBot；其余步骤相同。
+
+> 旧文档中的 `git clone` / `uv sync` 步骤对普通使用者已不再必需，故已简化。
+
+### 推荐可与 STT 插件配合实现与 Bot 全语音交流
+https://github.com/NickCharlie/Astrbot-Voice-To-Text-Plugin
 ### ⚙️ 基础配置
 
 <details>
