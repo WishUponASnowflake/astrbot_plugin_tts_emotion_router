@@ -152,7 +152,7 @@ class SessionState:
     "astrbot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.4.1",
+    "0.4.0",
 )
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -715,12 +715,6 @@ class TTSEmotionRouter(Star):
     # ---------------- 最终装饰阶段：兜底去除情绪标记泄露 -----------------
     @filter.on_decorating_result(priority=999)
     async def _final_strip_markers(self, event: AstrMessageEvent):  # type: ignore[override]
-        # 确保事件继续传播到其他装饰器
-        try:
-            event.continue_event()
-        except Exception:
-            pass
-            
         try:
             if not self.emo_marker_enable:
                 return
@@ -736,12 +730,6 @@ class TTSEmotionRouter(Star):
                         changed = True
             if changed:
                 logging.debug("TTSEmotionRouter: final marker cleanup applied")
-        except Exception:
-            pass
-            
-        # 再次确保事件继续传播
-        try:
-            event.continue_event()
         except Exception:
             pass
 
@@ -989,129 +977,15 @@ class TTSEmotionRouter(Star):
             
             yield event.plain_result(result_msg)
             
-            # 尝试发送音频 - 使用通用的结果方法
+            # 尝试发送音频
             try:
-                from astrbot.core.message.components.record import Record as RecordComponent
-                yield event.record_result(RecordComponent(file=str(audio_path)))
+                yield event.record_result(str(audio_path))
             except Exception as e:
-                try:
-                    # 备用方法：直接创建Record并添加到结果
-                    result = event.get_result()
-                    if result:
-                        result.chain.append(Record(file=str(audio_path)))
-                    yield event.plain_result("✅ 音频已添加到结果链")
-                except Exception as e2:
-                    yield event.plain_result(f"❌ 音频发送失败: {e}, 备用方法: {e2}")
+                yield event.plain_result(f"❌ 音频发送失败: {e}")
             
         except Exception as e:
             yield event.plain_result(f"❌ TTS测试失败: {e}")
             logging.error(f"TTS测试异常: {e}", exc_info=True)
-
-    @filter.command("tts_force_test", priority=1)
-    async def tts_force_test(self, event: AstrMessageEvent, *, text: Optional[str] = None):
-        """强制TTS测试，绕过所有检查。用法：tts_force_test [测试文本]"""
-        if not text:
-            text = "强制TTS测试成功"
-        
-        try:
-            sid = self._sess_id(event)
-            
-            # 强制启用会话
-            if self.global_enable:
-                if sid in self.disabled_sessions:
-                    self.disabled_sessions.remove(sid)
-            else:
-                if sid not in self.enabled_sessions:
-                    self.enabled_sessions.append(sid)
-            
-            # 选择默认情绪和音色
-            emotion = "neutral"
-            vkey, voice = self._pick_voice_for_emotion(emotion)
-            if not voice:
-                yield event.plain_result(f"❌ 未配置音色映射 voice_map.{emotion}")
-                return
-            
-            # 创建输出目录
-            out_dir = TEMP_DIR / sid
-            ensure_dir(out_dir)
-            
-            yield event.plain_result(f"🎵 强制生成TTS: '{text}'")
-            
-            # 直接调用TTS
-            audio_path = self.tts.synth(text, voice, out_dir, speed=None)
-            
-            if not audio_path or not audio_path.exists():
-                yield event.plain_result("❌ TTS生成失败")
-                return
-            
-            # 验证文件
-            file_size = audio_path.stat().st_size
-            if file_size == 0:
-                yield event.plain_result(f"❌ 生成的音频文件为空: {file_size}字节")
-                return
-            
-            yield event.plain_result(f"✅ TTS生成成功: {file_size}字节")
-            
-            # 直接修改结果链来发送音频
-            try:
-                result = event.get_result()
-                if result:
-                    # 使用相对路径
-                    import os
-                    work_dir = Path(os.getcwd())
-                    try:
-                        relative_path = audio_path.relative_to(work_dir)
-                        audio_file_path = str(relative_path).replace('\\', '/')
-                    except ValueError:
-                        audio_file_path = str(audio_path).replace('\\', '/')
-                    
-                    record = Record(file=audio_file_path)
-                    result.chain.append(record)
-                    yield event.plain_result(f"✅ 音频已添加到结果链: {audio_file_path}")
-                else:
-                    yield event.plain_result("❌ 无法获取结果对象")
-            except Exception as e:
-                yield event.plain_result(f"❌ 添加音频到结果链失败: {e}")
-            
-        except Exception as e:
-            yield event.plain_result(f"❌ 强制TTS测试失败: {e}")
-            logging.error(f"强制TTS测试异常: {e}", exc_info=True)
-
-    @filter.command("tts_debug_result", priority=1) 
-    async def tts_debug_result(self, event: AstrMessageEvent):
-        """调试当前结果信息"""
-        try:
-            result = event.get_result()
-            if not result:
-                yield event.plain_result("❌ 当前没有结果对象")
-                return
-            
-            debug_info = f"""🔍 结果调试信息：
-📊 result_content_type: {getattr(result, 'result_content_type', 'None')}
-🔗 chain长度: {len(result.chain) if result.chain else 0}
-📝 chain内容:"""
-
-            if result.chain:
-                for i, comp in enumerate(result.chain[:5]):  # 只显示前5个
-                    comp_type = type(comp).__name__
-                    if isinstance(comp, Plain):
-                        text_preview = (comp.text or "")[:50] + ("..." if len(comp.text or "") > 50 else "")
-                        debug_info += f"\n  [{i}] {comp_type}: '{text_preview}'"
-                    else:
-                        debug_info += f"\n  [{i}] {comp_type}"
-            else:
-                debug_info += "\n  (空)"
-
-            try:
-                is_llm = result.is_llm_result()
-                debug_info += f"\n🤖 is_llm_result(): {is_llm}"
-            except Exception as e:
-                debug_info += f"\n🤖 is_llm_result(): 错误 - {e}"
-
-            yield event.plain_result(debug_info)
-
-        except Exception as e:
-            yield event.plain_result(f"❌ 调试失败: {e}")
 
     @filter.command("tts_debug", priority=1)
     async def tts_debug(self, event: AstrMessageEvent):
@@ -1396,58 +1270,23 @@ class TTSEmotionRouter(Star):
         try:
             result = event.get_result()
             if result:
-                # 记录详细的结果信息用于调试
-                try:
-                    result_type = getattr(result, "result_content_type", None)
-                    chain_info = f"chain_len={len(result.chain or [])}"
-                    if result.chain:
-                        chain_types = [type(c).__name__ for c in result.chain[:3]]
-                        chain_info += f", types={chain_types}"
-                    logging.info(f"TTSEmotionRouter: result analysis - type={result_type}, {chain_info}")
-                except Exception:
-                    pass
-                
                 # 检查是否为LLM结果
                 is_llm_response = False
                 try:
                     # 方法1：使用is_llm_result()方法
                     is_llm_response = result.is_llm_result()
-                    logging.info(f"TTSEmotionRouter: is_llm_result()={is_llm_response}")
-                except Exception as e:
+                except Exception:
                     # 方法2：直接检查result_content_type
                     is_llm_response = (getattr(result, "result_content_type", None) == ResultContentType.LLM_RESULT)
-                    logging.info(f"TTSEmotionRouter: fallback check result_content_type={getattr(result, 'result_content_type', None)}, is_llm={is_llm_response}, error={e}")
                 
-                # 更宽松的LLM响应检测：如果结果链中包含文本且不是明确的系统指令，就允许TTS
+                # 如果不是LLM响应，则跳过TTS处理
                 if not is_llm_response:
-                    # 检查是否有文本内容
-                    has_text_content = any(isinstance(c, Plain) and c.text.strip() for c in (result.chain or []))
-                    logging.info(f"TTSEmotionRouter: has_text_content={has_text_content}")
-                    
-                    # 检查是否为明确的系统指令（通常以 / 开头）
-                    if has_text_content:
-                        first_text = next((c.text.strip() for c in (result.chain or []) if isinstance(c, Plain) and c.text.strip()), "")
-                        is_system_command = first_text.startswith(("/", "使用说明", "命令列表", "帮助"))
-                        logging.info(f"TTSEmotionRouter: first_text='{first_text[:50]}...', is_system_command={is_system_command}")
-                        
-                        if not is_system_command:
-                            # 有文本内容且不是系统指令，允许TTS处理
-                            logging.info("TTS processing: detected text content in non-LLM result, allowing TTS (likely LLM with tool calls)")
-                            is_llm_response = True
-                        else:
-                            logging.info("TTS skip: detected system command in response")
-                            try:
-                                event.continue_event()
-                            except Exception:
-                                pass
-                            return
-                    else:
-                        logging.info("TTS skip: not an LLM response and no text content")
-                        try:
-                            event.continue_event()
-                        except Exception:
-                            pass
-                        return
+                    logging.info("TTS skip: not an LLM response (likely a system command or plugin response)")
+                    try:
+                        event.continue_event()
+                    except Exception:
+                        pass
+                    return
                     
                 logging.info("TTS processing: LLM response detected, proceeding with TTS")
         except Exception as e:
