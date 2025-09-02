@@ -152,7 +152,7 @@ class SessionState:
     "astrbot_plugin_tts_emotion_router",
     "木有知",
     "按情绪路由到不同音色的TTS插件",
-    "0.4.0",
+    "0.4.2",
 )
 class TTSEmotionRouter(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -1736,3 +1736,4 @@ class TTSEmotionRouter(Star):
             await self._append_assistant_text_to_history(event, text)
         except Exception:
             pass
+
