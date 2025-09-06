@@ -39,8 +39,9 @@
 2. 安装 ffmpeg（系统仅需能调用 ffmpeg 命令）。  
 3. 拥有硅基流动（或兼容 OpenAI TTS 接口）的 API Key。  
 4. （可选）使用提供的音色上传工具压缩包导入自定义音色
-   [硅基音色一键上传.zip](https://github.com/user-attachments/files/22064355/default.zip)。  
-5. 在插件配置里填写 api 信息与 voice_map / speed_map。
+   方法1（推荐）：voice.gbkgov.cn【特别鸣谢Chris的硅基音色一键上传网站】
+   方法2： [硅基音色一键上传.zip](https://github.com/user-attachments/files/22064355/default.zip)。
+6. 在插件配置里填写 api 信息与 voice_map / speed_map。
    
 6.**配置检验**
    发送/tts_test 哈喽哈喽，出现以下回复就说明插件配置没问题（第一条正常就行，忽略第二条报错）
@@ -418,6 +419,7 @@ timeout: 15         # 缩短超时时间
 *让每一句话都充满感情！*
 
 </div>
+
 
 
 
