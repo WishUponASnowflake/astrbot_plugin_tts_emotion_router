@@ -125,7 +125,7 @@ from .emotion.infer import EMOTIONS
 from .emotion.classifier import HeuristicClassifier  # LLMClassifier 不再使用
 from .tts.provider_siliconflow import SiliconFlowTTS
 from .utils.audio import ensure_dir, cleanup_dir
-from .utils.extract import extractor, ExtractedContent
+from .utils.extract import CodeAndLinkExtractor, ProcessedText
 
 # 记录 astrbot 实际来源，便于远端排查“导入到插件内自带 AstrBot”的问题
 try:
@@ -258,6 +258,7 @@ class TTSEmotionRouter(Star):
             self._emo_head_token_re = None
             self._emo_head_anylabel_re = None
 
+        self.extractor = CodeAndLinkExtractor()
         self._session_state: Dict[str, SessionState] = {}
         # 事件级防重：最近发送签名与进行中签名
         self._recent_sends: Dict[str, float] = {}
@@ -594,8 +595,9 @@ class TTSEmotionRouter(Star):
         return text, None
 
     def _strip_emo_head_many(self, text: str) -> tuple[str, Optional[str]]:
-        """连续剥离多枚开头的EMO/emo标记（若LLM/其它插件重复注入）。返回(清理后文本, 最后一次解析到的情绪)。"""
+        """连续剥离多枚开头的EMO/emo标记，并清理全文中残留的任何可见标记。返回(清理后文本, 最后一次解析到的情绪)。"""
         last_label: Optional[str] = None
+        # 1. 优先清理头部，并提取情绪
         while True:
             cleaned, label = self._strip_emo_head(text)
             if label:
@@ -603,7 +605,15 @@ class TTSEmotionRouter(Star):
             if cleaned == text:
                 break
             text = cleaned
-        return text, last_label
+        
+        # 2. 全局清理任何位置的残留标记（不提取情绪，仅清理）
+        try:
+            if self._emo_marker_re:
+                text = self._emo_marker_re.sub("", text)
+        except Exception:
+            pass
+
+        return text.strip(), last_label
 
     def _strip_any_visible_markers(self, text: str) -> str:
         """更激进：移除文本任意位置的隐藏情绪标记：
@@ -712,27 +722,6 @@ class TTSEmotionRouter(Star):
         except Exception:
             pass
 
-    # ---------------- 最终装饰阶段：兜底去除情绪标记泄露 -----------------
-    @filter.on_decorating_result(priority=999)
-    async def _final_strip_markers(self, event: AstrMessageEvent):  # type: ignore[override]
-        try:
-            if not self.emo_marker_enable:
-                return
-            result = event.get_result()
-            if not result or not hasattr(result, 'chain'):
-                return
-            changed = False
-            for comp in list(result.chain):
-                if isinstance(comp, Plain) and getattr(comp, 'text', None):
-                    new_txt = self._strip_any_visible_markers(comp.text)
-                    if new_txt != comp.text:
-                        comp.text = new_txt
-                        changed = True
-            if changed:
-                logging.debug("TTSEmotionRouter: final marker cleanup applied")
-        except Exception:
-            pass
-
         # 2) 无论 completion_text 是否为空，都从 result_chain 首个 Plain 再尝试一次
         try:
             rc = getattr(response, "result_chain", None)
@@ -788,6 +777,27 @@ class TTSEmotionRouter(Star):
                         asyncio.create_task(self._delayed_history_write(event, cached_text.strip(), delay=0.8))
                     except Exception:
                         pass
+        except Exception:
+            pass
+
+    # ---------------- 最终装饰阶段：兜底去除情绪标记泄露 -----------------
+    @filter.on_decorating_result(priority=999)
+    async def _final_strip_markers(self, event: AstrMessageEvent):  # type: ignore[override]
+        try:
+            if not self.emo_marker_enable:
+                return
+            result = event.get_result()
+            if not result or not hasattr(result, 'chain'):
+                return
+            changed = False
+            for comp in list(result.chain):
+                if isinstance(comp, Plain) and getattr(comp, 'text', None):
+                    new_txt = self._strip_any_visible_markers(comp.text)
+                    if new_txt != comp.text:
+                        comp.text = new_txt
+                        changed = True
+            if changed:
+                logging.debug("TTSEmotionRouter: final marker cleanup applied")
         except Exception:
             pass
 
@@ -1363,34 +1373,40 @@ class TTSEmotionRouter(Star):
         text = self._normalize_text(text)
         text, _ = self._strip_emo_head_many(text)
 
-        # 提取代码和链接
-        extracted_content = extractor.extract_all(text)
-        logging.info(f"TTS: extracted_content count={len(extracted_content)}, text={text[:50]}...")
-        
-        # 如果有代码或链接，准备参考文献
-        references = ""
-        if extracted_content:
-            references = extractor.format_references(extracted_content)
-            logging.info(f"TTS: generated references length={len(references)}")
-            logging.info(f"TTS: references content preview={references[:200]}...")
-        
-        # 清理文本用于TTS
-        tts_text = extractor.clean_text_for_tts(text)
-        logging.info(f"TTS: tts_text length={len(tts_text)}, content={tts_text[:50]}...")
-        
+        # 使用新的 extractor.process_text 一次性处理
+        processed: ProcessedText = self.extractor.process_text(text)
+        tts_text = processed.speak_text
+        clean_text = processed.clean_text
+        links = processed.links
+        codes = processed.codes
+
+        # 动态构建 send_text
+        send_text = clean_text.strip()
+
+        # 仅当存在链接时，才附加参考文献
+        if self.show_references and links:
+            references_header = "\n\n参考文献:"
+            references_list = "\n".join(f"{i+1}. {link}" for i, link in enumerate(links))
+            send_text += f"{references_header}\n{references_list}"
+
+        # 仅当存在代码时，才附加参考代码
+        if self.show_references and codes:
+            code_header = "\n\n参考代码:"
+            # 代码块之间用换行符分隔
+            code_list = "\n".join(codes)
+            send_text += f"{code_header}\n{code_list}"
+
         # 检查是否还有文本需要朗读
         if not tts_text.strip():
-            logging.info("TTS skip: no text left after cleaning")
+            logging.info("TTS skip: no text left for TTS after processing")
+            # 即使没有可读文本，也应保留 send_text
+            result.chain = [Plain(text=send_text)]
             try:
                 event.continue_event()
             except Exception:
                 pass
             return
-        
-        # 注意：不再跳过TTS生成，而是继续执行后续流程
-        # 代码和链接的处理将在生成音频后，在结果链中添加参考文献
 
-        # 去重逻辑已移除：总是继续尝试合成
         st = self._session_state.setdefault(sid, SessionState())
         now = time.time()
         if self.cooldown > 0 and (now - st.last_ts) < self.cooldown:
@@ -1436,6 +1452,8 @@ class TTSEmotionRouter(Star):
         vkey, voice = self._pick_voice_for_emotion(emotion)
         if not voice:
             logging.warning("No voice mapped for emotion=%s", emotion)
+            # 无可用音色时，直接发送处理后的文本
+            result.chain = [Plain(text=send_text)]
             try:
                 event.continue_event()
             except Exception:
@@ -1466,169 +1484,86 @@ class TTSEmotionRouter(Star):
         out_dir = TEMP_DIR / sid
         ensure_dir(out_dir)
 
-        # 最后一重防线：若 TTS 前文本仍以 emo/token 开头，强制清理
-        try:
-            if text and (text.lower().lstrip().startswith("emo") or text.lstrip().startswith(("[", "【", "("))):
-                text, _ = self._strip_emo_head_many(text)
-        except Exception:
-            pass
-
         # 不做生成级去重：重复发送问题通过结果链策略规避
 
         try:
             audio_path = self.tts.synth(tts_text, voice, out_dir, speed=speed_override)
-            if not audio_path:
-                logging.error("TTS调用失败，降级为文本")
-                # TTS失败时，如果有代码或链接，添加参考文献
-                if references:
-                    # 使用清理后的文本 + 参考文献
-                    clean_text_for_display = extractor.clean_text_for_tts(orig_text)
-                    # 如果清理后的文本为空，使用原始文本
-                    if not clean_text_for_display.strip():
-                        clean_text_for_display = orig_text
-                    result.chain = [Plain(text=clean_text_for_display + references)]
-                    logging.info(f"TTS失败: 输出文本+参考文献，文本长度={len(clean_text_for_display)}")
-                else:
-                    result.chain = [Plain(text=orig_text)]
-                    logging.info("TTS失败: 输出纯文本")
-                try:
-                    event.continue_event()
-                except Exception:
-                    pass
-                return
-
-            # === 专门针对retcode=1200问题的增强处理 ===
             
-            # 1. 验证生成的音频文件
-            if not self._validate_audio_file(audio_path):
-                logging.error(f"TTS生成的音频文件无效: {audio_path}")
-                # 直接回退到文本，不发送无效音频
-                result.chain = [Plain(text=text)]
-                try:
-                    event.continue_event()
-                except Exception:
-                    pass
-                return
-            
-            # 2. 使用相对路径以提高兼容性
-            try:
-                # 计算相对于工作目录的路径
-                import os
-                work_dir = Path(os.getcwd())
-                try:
-                    relative_path = audio_path.relative_to(work_dir)
-                    audio_file_path = str(relative_path).replace('\\', '/')
-                    logging.info(f"TTS: 使用相对路径: {audio_file_path}")
-                except ValueError:
-                    # 如果无法计算相对路径，使用绝对路径
-                    audio_file_path = str(audio_path).replace('\\', '/')
-                    logging.info(f"TTS: 使用绝对路径: {audio_file_path}")
-            except Exception:
-                audio_file_path = str(audio_path)
-            
-            # 3. 创建Record对象前进行最后验证
-            try:
-                # 确保文件存在且可读
-                test_path = Path(audio_file_path) if not Path(audio_file_path).is_absolute() else audio_path
-                if not test_path.exists():
-                    raise FileNotFoundError(f"音频文件不存在: {test_path}")
-                
-                # 检查文件大小
-                file_size = test_path.stat().st_size
-                if file_size == 0:
-                    raise ValueError(f"音频文件为空: {test_path}")
-                
-                logging.info(f"TTS: 音频文件验证通过，大小={file_size}字节")
-                
-            except Exception as e:
-                logging.error(f"TTS: 音频文件验证失败: {e}")
-                # 验证失败时回退到纯文本
-                result.chain = [Plain(text=tts_text)]
-                try:
-                    event.continue_event()
-                except Exception:
-                    pass
-                return
-            
-            # 4. 使用更保守的Record创建策略
-            try:
-                record = Record(file=audio_file_path)
-                logging.info(f"TTS: 成功创建Record对象，路径={audio_file_path}")
-                
-                # 更新会话状态
+            # TTS 成功
+            if audio_path and self._validate_audio_file(audio_path):
+                logging.info(f"TTS: 音频生成成功: {audio_path}")
                 st.last_tts_content = tts_text
                 st.last_tts_time = time.time()
                 st.last_ts = time.time()
-
-                # 如果有代码或链接，根据配置决定是否发送参考文献
-                if references:
-                    if self.show_references and references.strip():
-                        # TTS已经输出了完整内容，文本只补充参考文献
-                        logging.info("TTS: sending references only (no original text)")
-                        result.chain = [Plain(text=references), record]
-                    else:
-                        # 不显示参考文献，只发送音频
-                        logging.info("TTS: references disabled, sending audio only")
-                        result.chain = [record]
+                
+                # 根据 allow_mixed 配置构建消息链
+                if self.allow_mixed:
+                    result.chain = [Plain(text=send_text), Record(file=str(audio_path))]
+                    logging.info("TTS: 输出最终消息链 (文本+语音)")
                 else:
-                    # 没有参考文献，根据 allow_mixed 决定是否同时发送文本
-                    if self.allow_mixed:
-                        result.chain = [Plain(text=orig_text), record]
-                        logging.info("TTS: 输出混合内容，无参考文献")
+                    # allow_mixed 为 False 时，检查是否有链接或代码
+                    if processed.has_links_or_code and self.show_references:
+                        # 构建包含参考文献和代码的文本
+                        ref_parts = []
+                        if links:
+                            references_header = "参考文献:"
+                            references_list = "\n".join(f"{i+1}. {link}" for i, link in enumerate(links))
+                            ref_parts.append(f"{references_header}\n{references_list}")
+                        if codes:
+                            code_header = "参考代码:"
+                            code_list = "\n".join(codes)
+                            ref_parts.append(f"{code_header}\n{code_list}")
+                        
+                        references_text = "\n\n".join(ref_parts)
+                        result.chain = [Plain(text=references_text), Record(file=str(audio_path))]
+                        logging.info("TTS: 输出最终消息链 (参考文献/代码+语音)")
                     else:
-                        result.chain = [record]
-                        logging.info("TTS: 输出纯音频")
-                
-                # 记录成功信息
-                logging.info(f"TTS: 音频处理完成 - 文件={audio_path.name}, 大小={file_size}字节")
-                
-            except Exception as e:
-                logging.error(f"TTS: 创建Record失败: {e}")
-                # Record创建失败，强制回退到文本
-                result.chain = [Plain(text=tts_text)]
-                logging.info("TTS: 已回退到纯文本输出")
+                        # 没有链接或代码，则只发送语音
+                        result.chain = [Record(file=str(audio_path))]
+                        logging.info("TTS: 输出最终消息链 (仅语音)")
 
-            # 5. 统一的后续处理
-            try:
-                _hp = any(isinstance(c, Plain) for c in result.chain)
-                _hr = any(isinstance(c, Record) for c in result.chain)
-                logging.info("TTS finalize: has_plain=%s, has_record=%s, text_len=%d", _hp, _hr, len(text))
-            except Exception:
-                pass
+            # TTS 失败或未生成有效文件
+            else:
+                logging.error("TTS调用失败或文件无效，降级为纯文本")
+                result.chain = [Plain(text=send_text)]
+                logging.info(f"TTS失败: 输出处理后的文本，长度={len(send_text)}")
 
-            try:
-                _ = await self._append_assistant_text_to_history(event, text)
-            except Exception:
-                pass
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            try:
-                st.last_assistant_text = text.strip()
-                st.last_assistant_text_time = time.time()
-            except Exception:
-                pass
-            try:
-                result.set_result_content_type(ResultContentType.LLM_RESULT)
-            except Exception:
-                pass
-            # 明确声明结果未停止
-            try:
-                event.continue_event()
-            except Exception:
-                pass
-            return
-        finally:
-            try:
-                event.continue_event()
-            except Exception:
-                pass
+        except Exception as e:
+            logging.error(f"TTS synth 异常: {e}", exc_info=True)
+            # 异常时也回退到纯文本
+            result.chain = [Plain(text=send_text)]
+
+        # 5. 统一的后续处理
         try:
-            logging.info("TTSEmotionRouter.on_decorating_result: exit is_stopped=%s", event.is_stopped())
+            _hp = any(isinstance(c, Plain) for c in result.chain)
+            _hr = any(isinstance(c, Record) for c in result.chain)
+            logging.info("TTS finalize: has_plain=%s, has_record=%s, text_len=%d", _hp, _hr, len(text))
+        except Exception:
+            pass
+
+        try:
+            _ = await self._append_assistant_text_to_history(event, text)
+        except Exception:
+            pass
+        try:
             event.continue_event()
         except Exception:
             pass
+        try:
+            st.last_assistant_text = text.strip()
+            st.last_assistant_text_time = time.time()
+        except Exception:
+            pass
+        try:
+            result.set_result_content_type(ResultContentType.LLM_RESULT)
+        except Exception:
+            pass
+        # 明确声明结果未停止
+        try:
+            event.continue_event()
+        except Exception:
+            pass
+        return
 
     async def _ensure_history_saved(self, event: AstrMessageEvent) -> None:
         """兜底：保证本轮助手可读文本写入到会话历史。
@@ -1736,5 +1671,4 @@ class TTSEmotionRouter(Star):
             await self._append_assistant_text_to_history(event, text)
         except Exception:
             pass
-
 
