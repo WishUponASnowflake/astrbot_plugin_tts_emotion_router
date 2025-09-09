@@ -1,6 +1,6 @@
 # 🎭 AstrBot TTS 情绪路由插件
 
-[![Version](https://img.shields.io/badge/version-0.4.2-blue.svg)](https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router)
+[![Version](https://img.shields.io/badge/version-0.4.3-blue.svg)](https://github.com/muyouzhi6/astrbot_plugin_tts_emotion_router)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 
@@ -352,7 +352,7 @@ timeout: 15         # 缩短超时时间
 ```
 
 ## 📈 版本历史
-- **v0.4.2** (当前)
+- **v0.4.3** (当前)
    - 🧩 代码/链接提取大幅优化：减少普通词、文件名、伪域名误判；支持去重、域名白名单、伪方法链过滤。
    - 🔍 行内代码智能判定：仅保留真正变量/函数/表达式；忽略模型名、版本号、纯扩展名及简单文件名。
    - 🔗 链接处理：去除重复、半截文件名与方法链不再当作链接；支持合法 TLD 过滤；保留真实 URL。
@@ -419,6 +419,7 @@ timeout: 15         # 缩短超时时间
 *让每一句话都充满感情！*
 
 </div>
+
 
 
 
