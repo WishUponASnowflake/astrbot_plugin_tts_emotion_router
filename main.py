@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 import asyncio
 
 def _ensure_compatible_astrbot():
-    """确保 astrbot API 兼容；若宿主astrbot不满足需要则回退到插件自带的AstrBot逻辑处理。"""
+    """确保 astrbot API 兼容；若宿主astrbot不满足需要则回退到插件自带的AstrBot处理。"""
     _PLUGIN_DIR = Path(__file__).parent
     _VENDORED_ROOT = _PLUGIN_DIR / "AstrBot"
     _VENDORED_ASTROBOT = _VENDORED_ROOT / "astrbot"
@@ -1671,6 +1671,7 @@ class TTSEmotionRouter(Star):
             await self._append_assistant_text_to_history(event, text)
         except Exception:
             pass
+
 
 
 
